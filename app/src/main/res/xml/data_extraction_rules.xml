@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Android 12+ 的数据提取规则：云备份与「设备间迁移」都不带走任何数据。
+
+    应用数据全在私有目录（内部 filesDir/config 与外部 getExternalFilesDir），卸载即删；
+    android:allowBackup="false" 已关掉云备份，但设备的「换机迁移」由本文件单独控制，
+    故这里把所有域都排除，确保重装 / 迁移后不会带回旧的 conf.yml、account.dat 等。
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="root" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="external" path="." />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="root" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="external" path="." />
+    </device-transfer>
+</data-extraction-rules>

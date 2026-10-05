@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FileProvider 可分享的目录白名单。
+  下载/回收站都在应用外部私有目录（external-files-path），配置在内部私有目录（files-path）。
+-->
+<paths>
+    <external-files-path name="ext_root" path="." />
+    <files-path name="int_root" path="." />
+    <cache-path name="cache_root" path="." />
+</paths>

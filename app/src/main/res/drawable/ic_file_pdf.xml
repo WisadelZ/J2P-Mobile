@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 资源管理器：PDF 条目。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M20,2H8c-1.1,0 -2,0.9 -2,2v12c0,1.1 0.9,2 2,2h12c1.1,0 2,-0.9 2,-2V4c0,-1.1 -0.9,-2 -2,-2zM11.5,9.5L10,11H8.5V7h1.5l1.5,1.5zM15.5,11h-2V7h2v4zM18.5,10H17v1h-1.5V7h3v3zM4,6H2v14c0,1.1 0.9,2 2,2h14v-2H4V6z" />
+</vector>
