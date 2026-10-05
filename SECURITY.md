@@ -16,7 +16,8 @@
 
 ## 报告安全漏洞
 
-优先通过 GitHub Issues 反馈：https://github.com/WisadelZ/J2P-Mobile/issues
+**只通过 GitHub Issues 反馈**，不接受 Pull Request：https://github.com/WisadelZ/J2P-Mobile/issues
+（本仓库不合并第三方改动，修复由维护者处理。）
 
 - 提交时请说明：影响版本、复现步骤、预期与实际结果、可能的影响范围。
 - **请勿在 Issue 中粘贴真实凭据**（账号密码、邮箱授权码等）。如果问题必须依赖敏感信息才能复现，请先只描述问题，等待维护者给出私下的沟通方式。

@@ -28,7 +28,12 @@
 ### 方式一：使用预编译版本（推荐）
 
 1. 访问 [Releases](https://github.com/WisadelZ/J2P-Mobile/releases) 页面
-2. 下载最新的 `J2P-Mobile-v2.4.3-android.beta.1.apk` 并安装（需 Android 7.0 及以上）
+2. 按手机架构选择对应的安装包并安装（需 Android 7.0 及以上）：
+   - `J2P-Mobile-v2.4.3-android.beta.1-arm64-v8a.apk` —— 仅 arm64-v8a（绝大多数真机选它）
+   - `J2P-Mobile-v2.4.3-android.beta.1-x86_64.apk` —— 仅 x86_64
+   - `J2P-Mobile-v2.4.3-android.beta.1.apk` —— 双架构（文件名不带架构名）
+
+> **如果你清楚你的手机架构，请选择对应架构安装包来安装，因为体积最小；如果你不清楚，当然也可以直接下载不带架构名的安装包，只是体积略大，无伤大雅。**
 
 ### 方式二：从源码构建
 
@@ -37,12 +42,17 @@
 git clone https://github.com/WisadelZ/J2P-Mobile.git
 cd J2P-Mobile
 
-# 构建调试包（双 ABI，模拟器与真机均可安装）
-./gradlew assembleDebug
+# 一次构建即产出 3 个包（体积：单架构 < 双架构）：
+#   app-release-arm64-v8a.apk   仅 arm64-v8a
+#   app-release-x86_64.apk      仅 x86_64
+#   app-release.apk             双架构（无后缀）
+./gradlew assembleRelease
 
-# 构建发布包（仅 arm64-v8a，体积更小）
-./gradlew assembleRelease -Pj2pmobile.abis=arm64-v8a
+# 调试包同理，一次也产出 3 个（文件名以 app-debug 开头）
+./gradlew assembleDebug
 ```
+
+> **如果你清楚你的手机架构，请选择对应架构安装包来安装，因为体积最小；如果你不清楚，当然也可以直接下载不带架构名的安装包，只是体积略大，无伤大雅。**
 
 构建依赖：JDK 17、Android SDK（compileSdk 37）、Chaquopy 17（内嵌 CPython 3.11）。
 Chaquopy 需要构建机上有同主次版本的 Python；可用 `-Pchaquopy.buildPython=<路径>` 指定，
@@ -182,14 +192,19 @@ mail:
   Pillow（图像处理）、pycryptodome（桌面端账号加密回退）、PyYAML（配置序列化）
 - **原生能力**：Android Keystore（账号加密）、BitmapFactory 解码 + 原生解扰、前台服务与通知、
   FileProvider 打开文件、应用内回收站软删除
-- **构建**：AGP 9.2 + Gradle 9.4 + JDK 17；`minSdk 24 / targetSdk 36`，debug 双 ABI、release 仅 arm64-v8a
+- **构建**：AGP 9.2 + Gradle 9.4 + JDK 17；`minSdk 24 / targetSdk 36`，
+  每次构建按 ABI 拆分，一次产出 **arm64-v8a / x86_64 / 双架构** 共 3 个包（单架构带 ABI 后缀，双架构不带）
 
 ## 🙏 反馈与建议
 
-欢迎提交 Issue 报告问题或提出建议！
+**本仓库只接受 Issue**：有功能需求或问题反馈，请到
+[Issues](https://github.com/WisadelZ/J2P-Mobile/issues) 提交。
 
-本项目采用 GPLv3 许可证（允许衍生作品），欢迎提交 Fork 修改后的 Pull Request；
-如有功能需求或 Bug，也可通过 [Issue](https://github.com/WisadelZ/J2P-Mobile/issues) 反馈。
+**不接受 Fork 与 Pull Request** —— 本仓库不合并第三方改动，问题与需求统一在 Issue 里沟通，
+由维护者处理。
+
+> 许可证层面与主项目一致：本项目采用 GPLv3（允许衍生作品），
+> 你仍然可以自由地自行 Fork、修改与再分发，但**对外发布的修改版须同样以 GPLv3 开源**。
 
 ## 📄 许可证
 
