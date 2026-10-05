@@ -1,3 +1,4 @@
+import com.android.build.api.variant.FilterConfiguration
 import java.util.Properties
 
 plugins {
@@ -18,14 +19,23 @@ android {
         versionCode = 2040301
         versionName = "v2.4.3-android.beta.1"
 
-        // ABI 必须写在 defaultConfig（Chaquopy 要求），且无法按 buildType 收窄，
-        // 因此用一个 Gradle 属性控制：默认双 ABI（真机 + 模拟器）；
-        // 出发布包时传 `-Pj2pmobile.abis=arm64-v8a` 只留真机 ABI（省约 25 MB）。
-        val abis = (findProperty("j2pmobile.abis") as String?)
-            ?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() }?.takeIf { it.isNotEmpty() }
-            ?: listOf("arm64-v8a", "x86_64")
+        // Chaquopy 强制要求 ndk.abiFilters 写在 defaultConfig（写进 buildType 会直接报错），
+        // 这里声明「支持的 ABI 全集」；最终产出哪几个包由下面的 splits 决定。
         ndk {
-            abiFilters += abis
+            abiFilters += listOf("arm64-v8a", "x86_64")
+        }
+    }
+
+    // 【一次构建出 3 个包】按 ABI 拆分，并额外产出双架构 universal 包：
+    //   app-<buildType>-arm64-v8a.apk  —— 仅 arm64-v8a（真机，体积最小）
+    //   app-<buildType>-x86_64.apk     —— 仅 x86_64（模拟器，体积最小）
+    //   app-<buildType>.apk            —— 双架构 universal（无后缀，体积略大，任何设备都能装）
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "x86_64")
+            isUniversalApk = true
         }
     }
 
@@ -63,7 +73,7 @@ android {
             }
         }
         release {
-            // 出发布包时用： gradlew assembleRelease -Pj2pmobile.abis=arm64-v8a
+            // 出发布包时用： gradlew assembleRelease（会产出 arm64-v8a / x86_64 / 双架构 共 3 个包）
             isMinifyEnabled = false
             // 临时沿用工程内密钥，保证产物可安装验证；正式发布前须换成独立的 release 密钥。
             if (fixedKeystore.exists()) {
@@ -128,6 +138,23 @@ chaquopy {
             install("certifi")             // requests 依赖
             install("img2pdf")             // 图片合成 PDF
             install("pypdf")               // 替代 pikepdf：元数据 + 取页图
+        }
+    }
+}
+
+// 【产物命名】把 splits 产出的 APK 改成「架构后缀」形式，便于发布时一眼区分：
+//   单架构（带 ABI 过滤）→ app-<buildType>-<abi>.apk
+//   双架构 universal（无 ABI 过滤）→ app-<buildType>.apk（无后缀）
+androidComponents {
+    onVariants { variant ->
+        variant.outputs.forEach { output ->
+            val abi = output.filters.firstOrNull {
+                it.filterType == FilterConfiguration.FilterType.ABI
+            }?.identifier
+            output.outputFileName.set(
+                if (abi == null) "app-${variant.name}.apk"
+                else "app-${variant.name}-$abi.apk"
+            )
         }
     }
 }
