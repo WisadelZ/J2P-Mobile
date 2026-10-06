@@ -114,6 +114,34 @@ def _text(value):
     return str(value).strip() if value is not None else ""
 
 
+def write_import_metadata(pdf_path, album_id, fallback_title=""):
+    """给导入的 PDF 补写元数据：本子 ID（Keywords 的 ``id:``）+ 页数 + 章节序号。
+
+    字段与「软件下载生成」的 PDF 完全一致（都在 DocInfo 的 Keywords 里），因此资源管理器
+    的按 ID 搜索、元数据面板，以及基于本子 ID 的书签文件都能直接沿用。原有的标题 / 作者 /
+    标签尽量保留，没有标题时用文件名兜底。
+    """
+    reader = PdfReader(pdf_path)
+    info = reader.metadata or {}
+    title = _text(info.get("/Title")) or str(fallback_title or "").strip()
+    docinfo = {
+        "title": title,
+        "creator": "J2P Mobile %s" % APP_VERSION,
+        "keywords": [
+            "%s:%s" % (_KEY_ID, album_id),
+            "%s:%d" % (_KEY_PAGES, len(reader.pages)),
+            "%s:%d" % (_KEY_CHAPTER, 1),
+        ],
+    }
+    author = _text(info.get("/Author"))
+    if author:
+        docinfo["author"] = author
+    subject = _text(info.get("/Subject"))
+    if subject:
+        docinfo["subject"] = subject
+    apply_docinfo(pdf_path, docinfo)
+
+
 def _parse_keywords(keywords):
     """解析 ``id:1,pages:2,chapter:3`` 形式的关键字。"""
     fields = {}

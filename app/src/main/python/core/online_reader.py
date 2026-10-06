@@ -74,6 +74,25 @@ class OnlineAlbum:
     def page_name(self, index):
         return self.name
 
+    def chapters(self):
+        """章节列表：每章的标题、起始全局页号与页数。
+
+        各章页数要先取一次章节详情（``check_photo``）才知道，因此首次调用会联网并
+        逐章取一次（结果缓存在会话里，阅读时本来也会取）；由界面在打开章节弹窗时调用。
+        """
+        result = []
+        offset = 0
+        for index in range(len(self._album)):
+            chapter = self._chapter(index)
+            count = len(chapter)
+            result.append({
+                "title": str(getattr(chapter, "title", "") or ""),
+                "start": offset,
+                "pages": count,
+            })
+            offset += count
+        return result
+
     def size(self, index):
         """该页图片的像素尺寸；还没取到该页时先返回占位尺寸。"""
         return self._sizes.get(index, DEFAULT_PAGE_SIZE)

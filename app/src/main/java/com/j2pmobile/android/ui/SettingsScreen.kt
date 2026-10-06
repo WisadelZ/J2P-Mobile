@@ -57,6 +57,7 @@ import com.j2pmobile.android.ApiResult
 import com.j2pmobile.android.AppLocale
 import com.j2pmobile.android.LogBridge
 import com.j2pmobile.android.R
+import com.j2pmobile.android.Updater
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
@@ -85,6 +86,8 @@ fun SettingsScreen(
      * 跟着队列快照重组，而这里只在点「导入」那一刻问一次。
      */
     isDownloadActive: () -> Boolean,
+    /** 点「检查更新」：把当前更新通道交给外壳层的更新中心。 */
+    onCheckUpdate: (String) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -93,6 +96,9 @@ fun SettingsScreen(
     var downloadDir by remember { mutableStateOf("") }
     var toPdf by remember { mutableStateOf(false) }
     var autoLogin by remember { mutableStateOf(false) }
+    var updateChannel by remember { mutableStateOf(Updater.CHANNEL_STABLE) }
+    var autoUpdate by remember { mutableStateOf(false) }
+    var previewPages by remember { mutableStateOf(true) }
 
     var statusRes by remember { mutableStateOf(R.string.status_ready) }
     var statusArg by remember { mutableStateOf<String?>(null) }
@@ -129,6 +135,9 @@ fun SettingsScreen(
             downloadDir = app.optString("download_dir")
             toPdf = app.optBoolean("to_pdf", false)
             autoLogin = app.optBoolean("auto_login", false)
+            updateChannel = app.optString("update_channel").ifEmpty { Updater.CHANNEL_STABLE }
+            autoUpdate = app.optBoolean("auto_update", false)
+            previewPages = app.optBoolean("preview_pages", true)
         }
     }
 
@@ -301,6 +310,30 @@ fun SettingsScreen(
             )
         }
 
+        // ---------------- 浏览设置 ----------------
+        SectionTitle(stringResource(R.string.section_browse))
+        Text(
+            text = stringResource(R.string.desc_browse),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(stringResource(R.string.switch_preview_pages), maxLines = 1)
+            Spacer(Modifier.width(12.dp))
+            Switch(
+                checked = previewPages,
+                onCheckedChange = { value ->
+                    previewPages = value
+                    persist(JSONObject().put("app", JSONObject().put("preview_pages", value))) {
+                        setStatus(
+                            if (value) R.string.status_preview_on else R.string.status_preview_off,
+                            if (value) StatusKind.OK else StatusKind.IDLE,
+                        )
+                    }
+                },
+            )
+        }
+
         // ---------------- 缓存管理 ----------------
         SectionTitle(stringResource(R.string.section_cache))
         Text(
@@ -323,6 +356,64 @@ fun SettingsScreen(
             modifier = Modifier.fillMaxWidth(),
         ) {
             Text(stringResource(R.string.btn_clear_cache))
+        }
+
+        // ---------------- 软件更新 ----------------
+        SectionTitle(stringResource(R.string.section_update))
+        Text(
+            text = stringResource(R.string.desc_update),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            text = stringResource(R.string.label_update_channel),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf(Updater.CHANNEL_STABLE, Updater.CHANNEL_BETA).forEach { channel ->
+                ChoiceButton(
+                    text = stringResource(channelLabelRes(channel)),
+                    selected = updateChannel == channel,
+                    onClick = {
+                        if (updateChannel == channel) return@ChoiceButton
+                        updateChannel = channel
+                        persist(
+                            JSONObject().put("app", JSONObject().put("update_channel", channel))
+                        ) {
+                            setStatus(
+                                R.string.status_update_channel,
+                                StatusKind.OK,
+                                stringResourceNow(context, channelLabelRes(channel)),
+                            )
+                        }
+                    },
+                )
+            }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Button(
+                onClick = { onCheckUpdate(updateChannel) },
+                modifier = Modifier.weight(1f),
+            ) {
+                Text(stringResource(R.string.btn_check_update), maxLines = 1)
+            }
+            Spacer(Modifier.width(12.dp))
+            Text(stringResource(R.string.switch_auto_update), maxLines = 1)
+            Spacer(Modifier.width(8.dp))
+            Switch(
+                checked = autoUpdate,
+                onCheckedChange = { value ->
+                    autoUpdate = value
+                    persist(JSONObject().put("app", JSONObject().put("auto_update", value))) {
+                        setStatus(
+                            if (value) R.string.status_auto_update_on
+                            else R.string.status_auto_update_off,
+                            if (value) StatusKind.OK else StatusKind.IDLE,
+                        )
+                    }
+                },
+            )
         }
 
         // ---------------- 关于（并入设置底部） ----------------
@@ -427,6 +518,12 @@ private fun themeLabelRes(mode: String): Int = when (mode) {
     ThemeMode.LIGHT -> R.string.theme_light
     ThemeMode.DARK -> R.string.theme_dark
     else -> R.string.theme_system
+}
+
+/** 更新通道的中文标签：稳定版 / 公测版。 */
+private fun channelLabelRes(channel: String): Int = when (channel) {
+    Updater.CHANNEL_BETA -> R.string.update_channel_beta
+    else -> R.string.update_channel_stable
 }
 
 /** 在非组合上下文里取资源文案（状态提示要带上「切换成了什么」）。 */

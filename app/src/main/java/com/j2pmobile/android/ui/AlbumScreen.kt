@@ -131,6 +131,8 @@ fun AlbumScreen(
     var previewThumbs by remember { mutableStateOf<List<Bitmap?>>(emptyList()) }
     var previewLoading by remember { mutableStateOf(true) }
     var previewError by remember { mutableStateOf<String?>(null) }
+    /** 「预览前五页」开关：关掉时详情页不拉预览、也不显示预览条。 */
+    var previewEnabled by remember { mutableStateOf(true) }
 
     /** 放大查看的当前页索引；-1 表示未打开。 */
     var zoomIndex by remember { mutableStateOf(-1) }
@@ -164,6 +166,15 @@ fun AlbumScreen(
             is ApiResult.Err -> loadError = result.message
         }
         loading = false
+
+        // 「预览前五页」开关：关掉就整段跳过（详情已经加载好了）
+        previewEnabled = ApiBridge.loadConfig()
+            .optJSONObject("config")?.optJSONObject("app")
+            ?.optBoolean("preview_pages", true) ?: true
+        if (!previewEnabled) {
+            previewLoading = false
+            return@LaunchedEffect
+        }
 
         previewLoading = true
         previewError = null
@@ -404,13 +415,15 @@ fun AlbumScreen(
             }
 
             // ---------------- 预览前几页 ----------------
-            PreviewStrip(
-                metas = metas,
-                thumbs = previewThumbs,
-                loading = previewLoading,
-                error = previewError,
-                onOpen = { zoomIndex = it },
-            )
+            if (previewEnabled) {
+                PreviewStrip(
+                    metas = metas,
+                    thumbs = previewThumbs,
+                    loading = previewLoading,
+                    error = previewError,
+                    onOpen = { zoomIndex = it },
+                )
+            }
 
             StatusLine(statusRes, statusArg, statusKind)
         }

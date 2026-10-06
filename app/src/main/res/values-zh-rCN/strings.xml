@@ -9,7 +9,6 @@
     <string name="settings_title">设置</string>
     <string name="album_title">本子详情</string>
     <string name="favorite_title">收藏列表</string>
-    <string name="help_title">帮助</string>
     <string name="btn_tasks">任务中心</string>
     <string name="placeholder_coming_soon">该页面正在开发中</string>
 
@@ -24,7 +23,7 @@
 
     <!-- 设置底部：关于（由原帮助页并入） -->
     <string name="about_title">关于</string>
-    <string name="about_version_value">v2.4.3-android.beta.1</string>
+    <string name="about_version_value">v2.4.4</string>
     <string name="about_author_value">WisadelZ</string>
     <string name="about_project_value">https://github.com/WisadelZ/J2P-Mobile</string>
     <string name="about_issues_value">https://github.com/WisadelZ/J2P-Mobile/issues</string>
@@ -272,6 +271,58 @@
     <string name="switch_auto_login">自动登录并签到</string>
     <string name="section_cache">缓存管理</string>
     <string name="desc_cache">清除软件运行期间产生的内存缓存（封面、搜索结果、收藏预览、头像等）。不会退出登录，也不影响已保存的配置与下载任务。</string>
+
+    <!-- 设置：浏览 -->
+    <string name="section_browse">浏览设置</string>
+    <string name="desc_browse">控制进入本子详情页时的默认行为。</string>
+    <string name="switch_preview_pages">预览前五页</string>
+    <string name="status_preview_on">已开启：进入详情页自动加载前五页预览</string>
+    <string name="status_preview_off">已关闭：进入详情页不再自动加载预览</string>
+
+    <!-- 资源管理器：视图与筛选 -->
+    <string name="explorer_view_list">列表视图</string>
+    <string name="explorer_view_grid">方格视图</string>
+    <string name="explorer_filter_all">全部</string>
+    <string name="explorer_filter_pdf">仅 PDF</string>
+    <string name="explorer_filter_folder">仅文件夹</string>
+
+    <!-- 设置：软件更新 -->
+    <string name="section_update">软件更新</string>
+    <string name="desc_update">手动检查是否有新版本；开启自动更新后，每次启动都会自动检查并提示。</string>
+    <string name="label_update_channel">更新通道</string>
+    <string name="update_channel_stable">稳定版</string>
+    <string name="update_channel_beta">公测版</string>
+    <string name="switch_auto_update">自动更新</string>
+    <string name="btn_check_update">检查更新</string>
+    <string name="btn_update_now">立即更新</string>
+    <string name="btn_install_again">重新安装</string>
+    <string name="btn_open_release">前往 Release 下载</string>
+    <string name="btn_stop_update">停止更新</string>
+    <string name="btn_background_update">后台更新</string>
+    <string name="status_update_stopped">已停止下载更新</string>
+    <string name="update_checking">正在检查更新...</string>
+    <string name="update_no_update_body">当前已是最新版本（v%1$s）。</string>
+    <string name="update_found_title">发现新版本</string>
+    <string name="update_found_body">当前版本：v%1$s\n最新版本：v%2$s\n\n是否立即下载并更新？</string>
+    <string name="update_found_version_line">发现新版本：v%1$s</string>
+    <string name="update_pick_source_title">请选择下载路径</string>
+    <string name="btn_retest">重新测速</string>
+    <string name="update_testing">正在测速...</string>
+    <string name="update_release_label">GitHub Release</string>
+    <string name="update_downloading_hint">正在从 %1$s 下载...</string>
+    <string name="update_done_title">更新已下载</string>
+    <string name="update_done_body">v%1$s 已下载完成，请按系统提示完成安装。若安装界面没有弹出，可点「重新安装」。</string>
+    <string name="update_failed_title">更新失败</string>
+    <string name="update_failed_body">下载更新失败：%1$s</string>
+    <string name="update_no_source_title">更新源不可用</string>
+    <string name="update_no_source_body">所有更新源当前都不可用或响应过慢。请稍后重试，或前往 GitHub Release 自行下载新版本。</string>
+    <string name="status_update_channel">更新通道已切换为「%1$s」</string>
+    <string name="status_auto_update_on">已开启自动更新：下次启动时自动检查</string>
+    <string name="status_auto_update_off">已关闭自动更新</string>
+    <string name="notification_update_channel_name">应用更新</string>
+    <string name="notification_update_channel_desc">应用更新下载进度</string>
+    <string name="update_notification_title">正在下载更新</string>
+    <string name="update_notification_downloading">正在下载 v%1$s...</string>
     <string name="btn_clear_cache">清除缓存</string>
     <string name="status_cache_cleared">缓存已清除</string>
     <string name="status_exported">配置已导出到 %1$s</string>
@@ -320,6 +371,11 @@
     <string name="status_opened">已打开 %1$s</string>
     <string name="status_deleted">已删除 %1$s 项，可在回收站中恢复</string>
     <string name="status_delete_failed">删除失败：%1$s</string>
+    <string name="explorer_import_pdf">导入 PDF</string>
+    <string name="status_importing">正在导入 PDF…</string>
+    <string name="status_import_ok">已导入 %1$s（本子 ID %2$s）</string>
+    <string name="status_pdf_import_failed">导入 PDF 失败：%1$s</string>
+    <string name="status_plain">%1$s</string>
 
     <!-- 阅读器（第 4 步切片 5b） -->
     <string name="btn_browse">浏览</string>
@@ -334,4 +390,70 @@
     <string name="reader_jump_title">跳转到指定页</string>
     <string name="reader_jump_label">页码（共 %1$d 页）</string>
     <string name="reader_page_failed">第 %1$d 页加载失败：%2$s（点按重试）</string>
+
+    <!-- 阅读器增强（第 4 步切片 5e）：阅读设置 / 章节 / 书签 -->
+    <string name="reader_settings_title">阅读设置</string>
+    <string name="reader_settings_general">通用</string>
+    <string name="reader_settings_horizontal">横式</string>
+    <string name="reader_settings_vertical">竖式</string>
+    <string name="reader_settings_vertical_none">竖式阅读暂无独立设置</string>
+    <string name="reader_setting_volume_turn">音量键翻页</string>
+    <string name="reader_setting_auto_turn">自动翻页</string>
+    <string name="reader_auto_turn_interval">间隔</string>
+    <string name="reader_unit_second">秒</string>
+    <string name="reader_setting_click_turn">点击翻页</string>
+    <string name="reader_setting_click_direction">点击方向</string>
+    <string name="reader_click_area_vertical">上下点击</string>
+    <string name="reader_click_area_horizontal">左右点击</string>
+    <string name="reader_setting_turn_direction">翻页方向</string>
+    <string name="reader_dir_ltr">从左到右</string>
+    <string name="reader_dir_rtl">从右到左</string>
+    <string name="reader_hint_click_lr" formatted="false">左侧 30%：上一页　中间 40%：显示/隐藏界面　右侧 30%：下一页</string>
+    <string name="reader_hint_click_tb" formatted="false">上侧 30%：上一页　中间 40%：显示/隐藏界面　下侧 30%：下一页</string>
+    <string name="reader_chapters">章节</string>
+    <string name="reader_chapters_title">选择章节</string>
+    <string name="reader_chapters_loading">正在读取章节…</string>
+    <string name="reader_chapters_failed">读取章节失败：%1$s</string>
+    <string name="reader_chapters_empty">本子只有一章</string>
+    <string name="reader_chapter_range">第 %1$d–%2$d 页</string>
+    <string name="reader_chapter_current">当前</string>
+    <string name="reader_bookmark_add">添加书签</string>
+    <string name="reader_bookmarks_title">书签</string>
+    <string name="reader_bookmark_note">备注</string>
+    <string name="reader_bookmark_note_hint">备注（可留空）</string>
+    <string name="reader_bookmark_page">页码</string>
+    <string name="reader_bookmark_page_value">第 %1$d / %2$d 页</string>
+    <string name="reader_bookmark_time">时间</string>
+    <string name="reader_bookmark_no_note">（无备注）</string>
+    <string name="reader_bookmark_created">创建时间</string>
+    <string name="reader_bookmark_updated">更新时间</string>
+    <string name="reader_bookmark_added">已添加书签</string>
+    <string name="reader_bookmark_note_updated">已修改备注</string>
+    <string name="reader_bookmark_deleted">已删除书签</string>
+    <string name="reader_bookmark_empty">本子还没有书签</string>
+    <string name="reader_bookmark_refresh">刷新</string>
+    <string name="reader_bookmarks_failed">读取书签失败：%1$s</string>
+    <string name="reader_bookmark_actions">书签</string>
+    <string name="reader_bookmark_jump">跳转</string>
+    <string name="reader_bookmark_edit">修改备注</string>
+    <string name="reader_bookmark_delete">删除</string>
+    <string name="reader_bookmark_sort_note">备注（拼音）</string>
+    <string name="reader_bookmark_sort_page">页码</string>
+    <string name="reader_bookmark_sort_created">创建时间</string>
+    <string name="reader_bookmark_sort_updated">更新时间</string>
+    <string name="reader_save_page">保存当前页到相册</string>
+    <string name="reader_save_page_done">已保存到相册：%1$s</string>
+    <string name="reader_save_page_failed">保存失败：%1$s</string>
+    <string name="reader_save_page_pending">该页尚未加载完成，请稍后重试</string>
+    <string name="reader_save_page_no_permission">未获得存储权限，无法保存到相册</string>
+    <string name="source_switch">切换加载源</string>
+    <string name="source_dialog_title">切换加载源</string>
+    <string name="source_node">节点 %1$d</string>
+    <string name="source_delay">%1$d ms</string>
+    <string name="btn_source_test">延迟测试</string>
+    <string name="source_testing">正在测速…</string>
+    <string name="source_tested">测速完成：共 %1$d 个可用节点</string>
+    <string name="source_switched">已切换到节点 %1$d</string>
+    <string name="source_empty">当前没有可用的加载源，请稍后重试</string>
+    <string name="btn_exit">退出</string>
 </resources>

@@ -35,7 +35,8 @@ enum class AppRoute(@StringRes val titleRes: Int) {
     Favorite(R.string.favorite_title),
     Settings(R.string.settings_title),
     Reader(R.string.btn_browse),
-    Help(R.string.help_title);
+    ReaderSettings(R.string.reader_settings_title),
+    Bookmarks(R.string.reader_bookmarks_title);
 
     companion object {
         /** 底部导航的四个入口：顺序即底部按钮顺序（探索 / 下载 / 资源管理器 / 账号）。 */

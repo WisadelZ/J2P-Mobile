@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 阅读器顶栏：打开书签页（多个书签，与「添加书签」区分开）。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M19,18l2,1V3c0,-1.1 -0.9,-2 -2,-2H8c-1.1,0 -2,0.9 -2,2v1h11c1.1,0 2,0.9 2,2v12zM6,6c-1.1,0 -2,0.9 -2,2v15l7,-3 7,3V8c0,-1.1 -0.9,-2 -2,-2H6z" />
+</vector>

@@ -103,6 +103,8 @@ class Reader:
         self.path = path
         self.name = os.path.basename(path)
         self.kind = "pdf" if is_pdf(path) else "images"
+        # 本子 ID：保存单页 / 书签归属时用来标识这一本（PDF 取元数据里的 id）
+        self.album_id = self._resolve_album_id()
         # PDF 每页没有名字，右下角显示「当前页/总页数」；图片文件夹显示文件名
         self.numbered_pages = self.kind == "pdf"
         self._files = []
@@ -122,6 +124,21 @@ class Reader:
     @property
     def page_count(self):
         return len(self._files) if self.kind == "images" else len(self._pdf.pages)
+
+    def _resolve_album_id(self):
+        """本子 ID：PDF 优先取元数据里的 id，其余退回文件 / 文件夹名。"""
+        if self.kind == "pdf":
+            try:
+                from core import pdf_metadata
+
+                meta = pdf_metadata.read_metadata(self.path) or {}
+                album = str(meta.get("album_id") or "").strip()
+                if album:
+                    return album
+            except Exception:
+                pass          # 读元数据只是为了让命名更准确，失败不影响浏览
+            return os.path.splitext(self.name)[0]
+        return os.path.basename(self.path.rstrip("\\/")) or self.name
 
     def page_name(self, index):
         """当前页的名称：图片是文件名；PDF 用不到（界面显示页码）。"""

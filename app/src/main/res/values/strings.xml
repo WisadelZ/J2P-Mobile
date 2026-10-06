@@ -11,7 +11,6 @@
     <string name="settings_title">Settings</string>
     <string name="album_title">Comic details</string>
     <string name="favorite_title">Favorites</string>
-    <string name="help_title">Help</string>
     <string name="btn_tasks">Tasks</string>
     <string name="placeholder_coming_soon">This page is under construction</string>
 
@@ -26,7 +25,7 @@
 
     <!-- 设置底部：关于（由原帮助页并入） -->
     <string name="about_title">About</string>
-    <string name="about_version_value">v2.4.3-android.beta.1</string>
+    <string name="about_version_value">v2.4.4</string>
     <string name="about_author_value">WisadelZ</string>
     <string name="about_project_value">https://github.com/WisadelZ/J2P-Mobile</string>
     <string name="about_issues_value">https://github.com/WisadelZ/J2P-Mobile/issues</string>
@@ -274,6 +273,58 @@
     <string name="switch_auto_login">Auto sign-in and daily check-in</string>
     <string name="section_cache">Cache</string>
     <string name="desc_cache">Clear the in-memory cache produced while the app is running (covers, search results, favorite previews, avatars). It does not sign you out and leaves saved configuration and download tasks untouched.</string>
+
+    <!-- 设置：浏览 -->
+    <string name="section_browse">Browsing</string>
+    <string name="desc_browse">Controls the default behavior when opening a comic\'s detail page.</string>
+    <string name="switch_preview_pages">Preview first five pages</string>
+    <string name="status_preview_on">Enabled: the first five pages load automatically</string>
+    <string name="status_preview_off">Disabled: previews no longer load automatically</string>
+
+    <!-- 资源管理器：视图与筛选 -->
+    <string name="explorer_view_list">List view</string>
+    <string name="explorer_view_grid">Grid view</string>
+    <string name="explorer_filter_all">All</string>
+    <string name="explorer_filter_pdf">PDF only</string>
+    <string name="explorer_filter_folder">Folders only</string>
+
+    <!-- 设置：软件更新 -->
+    <string name="section_update">Software Update</string>
+    <string name="desc_update">Check for a new version manually, or turn on auto update to check and prompt on every launch.</string>
+    <string name="label_update_channel">Update channel</string>
+    <string name="update_channel_stable">Stable</string>
+    <string name="update_channel_beta">Beta</string>
+    <string name="switch_auto_update">Auto update</string>
+    <string name="btn_check_update">Check for updates</string>
+    <string name="btn_update_now">Update now</string>
+    <string name="btn_install_again">Install again</string>
+    <string name="btn_open_release">Open GitHub Releases</string>
+    <string name="btn_stop_update">Stop update</string>
+    <string name="btn_background_update">Update in background</string>
+    <string name="status_update_stopped">Update download stopped</string>
+    <string name="update_checking">Checking for updates...</string>
+    <string name="update_no_update_body">You are already on the latest version (v%1$s).</string>
+    <string name="update_found_title">New version available</string>
+    <string name="update_found_body">Current version: v%1$s\nLatest version: v%2$s\n\nDownload and update now?</string>
+    <string name="update_found_version_line">New version: v%1$s</string>
+    <string name="update_pick_source_title">Choose a download source</string>
+    <string name="btn_retest">Retest</string>
+    <string name="update_testing">Testing...</string>
+    <string name="update_release_label">GitHub Release</string>
+    <string name="update_downloading_hint">Downloading from %1$s...</string>
+    <string name="update_done_title">Update downloaded</string>
+    <string name="update_done_body">v%1$s has been downloaded. Follow the system prompt to finish installing. If the installer did not open, tap \"Install again\".</string>
+    <string name="update_failed_title">Update failed</string>
+    <string name="update_failed_body">Failed to download the update: %1$s</string>
+    <string name="update_no_source_title">Update source unavailable</string>
+    <string name="update_no_source_body">All update sources are currently unavailable or too slow. Please retry later, or download the new version from GitHub Releases.</string>
+    <string name="status_update_channel">Update channel switched to \"%1$s\"</string>
+    <string name="status_auto_update_on">Auto update enabled: it will check on the next launch</string>
+    <string name="status_auto_update_off">Auto update disabled</string>
+    <string name="notification_update_channel_name">App updates</string>
+    <string name="notification_update_channel_desc">Progress of app update downloads</string>
+    <string name="update_notification_title">Downloading update</string>
+    <string name="update_notification_downloading">Downloading v%1$s...</string>
     <string name="btn_clear_cache">Clear Cache</string>
     <string name="status_cache_cleared">Cache cleared</string>
     <string name="status_exported">Configuration exported to %1$s</string>
@@ -322,6 +373,11 @@
     <string name="status_opened">Opened %1$s</string>
     <string name="status_deleted">Deleted %1$s item(s), recoverable from the Recycle Bin</string>
     <string name="status_delete_failed">Failed to delete: %1$s</string>
+    <string name="explorer_import_pdf">Import PDF</string>
+    <string name="status_importing">Importing the PDF...</string>
+    <string name="status_import_ok">Imported %1$s (comic ID %2$s)</string>
+    <string name="status_pdf_import_failed">Failed to import the PDF: %1$s</string>
+    <string name="status_plain">%1$s</string>
 
     <!-- Reader (step 4, slice 5b) -->
     <string name="btn_browse">Browse</string>
@@ -336,4 +392,70 @@
     <string name="reader_jump_title">Go to page</string>
     <string name="reader_jump_label">Page (of %1$d)</string>
     <string name="reader_page_failed">Page %1$d failed to load: %2$s (tap to retry)</string>
+
+    <!-- Reader enhancements (step 4, slice 5e): reading settings / chapters / bookmarks -->
+    <string name="reader_settings_title">Reading settings</string>
+    <string name="reader_settings_general">General</string>
+    <string name="reader_settings_horizontal">Horizontal</string>
+    <string name="reader_settings_vertical">Vertical</string>
+    <string name="reader_settings_vertical_none">No vertical-only setting yet</string>
+    <string name="reader_setting_volume_turn">Volume-key paging</string>
+    <string name="reader_setting_auto_turn">Auto paging</string>
+    <string name="reader_auto_turn_interval">Interval</string>
+    <string name="reader_unit_second">s</string>
+    <string name="reader_setting_click_turn">Tap to turn pages</string>
+    <string name="reader_setting_click_direction">Tap direction</string>
+    <string name="reader_click_area_vertical">Top / bottom tap</string>
+    <string name="reader_click_area_horizontal">Left / right tap</string>
+    <string name="reader_setting_turn_direction">Paging direction</string>
+    <string name="reader_dir_ltr">Left to right</string>
+    <string name="reader_dir_rtl">Right to left</string>
+    <string name="reader_hint_click_lr" formatted="false">Left 30%: previous　Middle 40%: show/hide UI　Right 30%: next</string>
+    <string name="reader_hint_click_tb" formatted="false">Top 30%: previous　Middle 40%: show/hide UI　Bottom 30%: next</string>
+    <string name="reader_chapters">Chapters</string>
+    <string name="reader_chapters_title">Choose a chapter</string>
+    <string name="reader_chapters_loading">Loading chapters...</string>
+    <string name="reader_chapters_failed">Failed to load chapters: %1$s</string>
+    <string name="reader_chapters_empty">This comic has only one chapter</string>
+    <string name="reader_chapter_range">Pages %1$d–%2$d</string>
+    <string name="reader_chapter_current">Current</string>
+    <string name="reader_bookmark_add">Add bookmark</string>
+    <string name="reader_bookmarks_title">Bookmarks</string>
+    <string name="reader_bookmark_note">Note</string>
+    <string name="reader_bookmark_note_hint">Note (optional)</string>
+    <string name="reader_bookmark_page">Page</string>
+    <string name="reader_bookmark_page_value">Page %1$d of %2$d</string>
+    <string name="reader_bookmark_time">Time</string>
+    <string name="reader_bookmark_no_note">(no note)</string>
+    <string name="reader_bookmark_created">Created</string>
+    <string name="reader_bookmark_updated">Updated</string>
+    <string name="reader_bookmark_added">Bookmark added</string>
+    <string name="reader_bookmark_note_updated">Note updated</string>
+    <string name="reader_bookmark_deleted">Bookmark deleted</string>
+    <string name="reader_bookmark_empty">No bookmarks for this comic yet</string>
+    <string name="reader_bookmark_refresh">Refresh</string>
+    <string name="reader_bookmarks_failed">Failed to load bookmarks: %1$s</string>
+    <string name="reader_bookmark_actions">Bookmark</string>
+    <string name="reader_bookmark_jump">Go to page</string>
+    <string name="reader_bookmark_edit">Edit note</string>
+    <string name="reader_bookmark_delete">Delete</string>
+    <string name="reader_bookmark_sort_note">Note (pinyin)</string>
+    <string name="reader_bookmark_sort_page">Page</string>
+    <string name="reader_bookmark_sort_created">Created</string>
+    <string name="reader_bookmark_sort_updated">Updated</string>
+    <string name="reader_save_page">Save current page to gallery</string>
+    <string name="reader_save_page_done">Saved to gallery: %1$s</string>
+    <string name="reader_save_page_failed">Failed to save: %1$s</string>
+    <string name="reader_save_page_pending">This page is not loaded yet, please try again</string>
+    <string name="reader_save_page_no_permission">Storage permission denied, cannot save to gallery</string>
+    <string name="source_switch">Switch loading source</string>
+    <string name="source_dialog_title">Switch loading source</string>
+    <string name="source_node">Node %1$d</string>
+    <string name="source_delay">%1$d ms</string>
+    <string name="btn_source_test">Latency test</string>
+    <string name="source_testing">Testing latency...</string>
+    <string name="source_tested">Test finished: %1$d node(s) available</string>
+    <string name="source_switched">Switched to node %1$d</string>
+    <string name="source_empty">No loading source is available now, please try again later</string>
+    <string name="btn_exit">Exit</string>
 </resources>

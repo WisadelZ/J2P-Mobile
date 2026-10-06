@@ -16,6 +16,17 @@
  */
 package com.j2pmobile.android.ui
 
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.pdf.PdfRenderer
+import android.net.Uri
+import android.os.ParcelFileDescriptor
+import android.provider.OpenableColumns
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -24,12 +35,15 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -59,6 +73,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
@@ -67,12 +85,16 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.j2pmobile.android.ApiBridge
 import com.j2pmobile.android.ApiResult
+import com.j2pmobile.android.ImportedPdf
 import com.j2pmobile.android.LibraryEntry
 import com.j2pmobile.android.LogBridge
 import com.j2pmobile.android.PdfMeta
 import com.j2pmobile.android.R
 import com.j2pmobile.android.ReaderSource
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 
 /** 搜索方式与排序字段（与 `core/library.py` 的常量一致）。 */
 private val SEARCH_MODES = listOf("all", "name", "author", "tag", "id")
@@ -87,6 +109,19 @@ private val SORT_DESC_DEFAULT = mapOf(
     "size" to true,
     "pages" to true,
 )
+
+/** 资源管理器的两种视图（按钮图标展示的就是当前这一种）。 */
+private const val VIEW_LIST = "list"
+private const val VIEW_GRID = "grid"
+
+/** 类型筛选：全部 / 仅 PDF / 仅文件夹。 */
+private const val FILTER_ALL = "all"
+private const val FILTER_PDF = "pdf"
+private const val FILTER_FOLDER = "folder"
+
+/** 方格封面：目标宽度与可当封面的图片扩展名。 */
+private const val COVER_TARGET_PX = 240
+private val COVER_IMAGE_EXTS = setOf("jpg", "jpeg", "png", "webp", "bmp", "gif")
 
 /**
  * 资源管理器的可变状态（由 [AppShell] 持有）。
@@ -111,6 +146,12 @@ class ExplorerState {
     var mode by mutableStateOf(DEFAULT_MODE)
     var sortKey by mutableStateOf(DEFAULT_SORT)
     var sortDesc by mutableStateOf(false)
+
+    /** 列表 / 方格视图。 */
+    var viewMode by mutableStateOf(VIEW_LIST)
+
+    /** 全部 / 仅 PDF / 仅文件夹。 */
+    var typeFilter by mutableStateOf(FILTER_ALL)
 
     /** 已勾选的路径（PDF 或图片文件夹）。 */
     var checked by mutableStateOf<Set<String>>(emptySet())
@@ -152,12 +193,14 @@ fun ExplorerScreen(
     modifier: Modifier = Modifier,
 ) {
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
 
     var metaDialogOpen by remember { mutableStateOf(false) }
     var meta by remember { mutableStateOf<PdfMeta?>(null) }
     var metaError by remember { mutableStateOf<String?>(null) }
     var metaLoading by remember { mutableStateOf(false) }
     var deleteDialogOpen by remember { mutableStateOf(false) }
+    var importing by remember { mutableStateOf(false) }
 
     /** 扫描 + 过滤 + 排序（沿用当前关键词 / 方式 / 排序）。 */
     fun reload() {
@@ -242,13 +285,45 @@ fun ExplorerScreen(
         }
     }
 
+    /**
+     * 导入外部 PDF：系统文件选择器选一个 PDF → Kotlin 先把内容写进应用缓存 →
+     * Python 复制进下载目录、分配新的八位本子 ID 并写入 PDF 元数据。
+     */
+    val importLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri == null || importing) return@rememberLauncherForActivityResult
+        importing = true
+        state.setStatus(R.string.status_importing, StatusKind.IDLE)
+        scope.launch {
+            when (val result = copyAndImport(context, uri)) {
+                is ApiResult.Ok -> {
+                    // 状态行只收一个参数，这里先把两段的文案拼好再交给它
+                    state.setStatus(
+                        R.string.status_plain,
+                        StatusKind.OK,
+                        context.getString(
+                            R.string.status_import_ok, result.value.name, result.value.albumId
+                        ),
+                    )
+                    reload()
+                }
+
+                is ApiResult.Err -> state.setStatus(
+                    R.string.status_pdf_import_failed, StatusKind.ERR, result.message
+                )
+            }
+            importing = false
+        }
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
             .padding(horizontal = 8.dp, vertical = 6.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        // ---------------- 目录 + 刷新 ----------------
+        // ---------------- 目录 + 导入 / 刷新 ----------------
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 text = stringResource(R.string.explorer_dir, state.dir),
@@ -259,6 +334,17 @@ fun ExplorerScreen(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
+            // 导入 PDF：选一个外部 PDF，复制进下载目录并分配新的本子 ID
+            IconButton(
+                onClick = { importLauncher.launch(arrayOf("application/pdf")) },
+                enabled = !importing,
+            ) {
+                Icon(
+                    painter = painterResource(R.drawable.ic_add),
+                    contentDescription = stringResource(R.string.explorer_import_pdf),
+                    modifier = Modifier.size(20.dp),
+                )
+            }
             IconButton(onClick = { reload() }, enabled = !state.loading) {
                 Icon(
                     painter = painterResource(R.drawable.ic_refresh),
@@ -335,12 +421,23 @@ fun ExplorerScreen(
 
         HorizontalDivider()
 
-        // ---------------- 列表 ----------------
+        // ---------------- 列表 / 方格 ----------------
+        val visible = remember(state.entries, state.typeFilter) {
+            when (state.typeFilter) {
+                FILTER_PDF -> state.entries.filter { it.pdf.isNotEmpty() }
+                FILTER_FOLDER -> state.entries.filter { it.folder.isNotEmpty() }
+                else -> state.entries
+            }
+        }
+        val toggle: (String) -> Unit = { path ->
+            state.checked = if (path in state.checked) state.checked - path
+            else state.checked + path
+        }
         Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-            if (state.entries.isEmpty()) {
+            if (visible.isEmpty()) {
                 Text(
-                    // 区分「下载目录本来就是空的」与「只是没匹配上搜索条件」
-                    text = if (state.keyword.isNotEmpty()) {
+                    // 区分「下载目录本来就是空的」与「只是没匹配上搜索/筛选条件」
+                    text = if (state.keyword.isNotEmpty() || state.typeFilter != FILTER_ALL) {
                         stringResource(R.string.explorer_no_match)
                     } else {
                         stringResource(R.string.explorer_empty)
@@ -349,24 +446,55 @@ fun ExplorerScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(12.dp),
                 )
+            } else if (state.viewMode == VIEW_GRID) {
+                // 方格视图：同一本漫画的图片文件夹与 PDF 各占一格、并排出现
+                LazyVerticalGrid(
+                    columns = GridCells.Adaptive(112.dp),
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    visible.forEach { entry ->
+                        if (entry.folder.isNotEmpty() && showsKind(state.typeFilter, folder = true)) {
+                            item(key = entry.folder) {
+                                GridCell(
+                                    path = entry.folder,
+                                    title = entry.name,
+                                    typeRes = R.string.explorer_type_folder,
+                                    isFolder = true,
+                                    selected = entry.folder in state.checked,
+                                    onToggle = { toggle(entry.folder) },
+                                )
+                            }
+                        }
+                        if (entry.pdf.isNotEmpty() && showsKind(state.typeFilter, folder = false)) {
+                            item(key = entry.pdf) {
+                                GridCell(
+                                    path = entry.pdf,
+                                    title = entry.name,
+                                    typeRes = R.string.explorer_type_pdf,
+                                    isFolder = false,
+                                    selected = entry.pdf in state.checked,
+                                    onToggle = { toggle(entry.pdf) },
+                                )
+                            }
+                        }
+                    }
+                }
             } else {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(vertical = 4.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
-                    state.entries.forEach { entry ->
+                    visible.forEach { entry ->
                         item(key = entry.name) {
                             EntryGroup(
                                 entry = entry,
+                                filter = state.typeFilter,
                                 checked = state.checked,
-                                onToggle = { path ->
-                                    state.checked = if (path in state.checked) {
-                                        state.checked - path
-                                    } else {
-                                        state.checked + path
-                                    }
-                                },
+                                onToggle = toggle,
                             )
                         }
                     }
@@ -678,6 +806,42 @@ private fun ExplorerToolbar(state: ExplorerState, onReload: () -> Unit) {
                 modifier = Modifier.size(18.dp),
             )
         }
+        // 视图切换：图标展示当前视图（列表 / 方格），点一下切换
+        IconButton(
+            onClick = {
+                state.viewMode = if (state.viewMode == VIEW_GRID) VIEW_LIST else VIEW_GRID
+            },
+            modifier = Modifier.size(36.dp),
+        ) {
+            Icon(
+                painter = painterResource(
+                    if (state.viewMode == VIEW_GRID) R.drawable.ic_grid_view
+                    else R.drawable.ic_list
+                ),
+                contentDescription = stringResource(
+                    if (state.viewMode == VIEW_GRID) R.string.explorer_view_grid
+                    else R.string.explorer_view_list
+                ),
+                modifier = Modifier.size(18.dp),
+            )
+        }
+        // 类型筛选：全部 → 仅 PDF → 仅文件夹 → 全部
+        IconButton(
+            onClick = {
+                state.typeFilter = when (state.typeFilter) {
+                    FILTER_ALL -> FILTER_PDF
+                    FILTER_PDF -> FILTER_FOLDER
+                    else -> FILTER_ALL
+                }
+            },
+            modifier = Modifier.size(36.dp),
+        ) {
+            Icon(
+                painter = painterResource(filterIconRes(state.typeFilter)),
+                contentDescription = stringResource(filterLabelRes(state.typeFilter)),
+                modifier = Modifier.size(18.dp),
+            )
+        }
 
         Spacer(Modifier.weight(1f))
         Text(
@@ -691,6 +855,20 @@ private fun ExplorerToolbar(state: ExplorerState, onReload: () -> Unit) {
             maxLines = 1,
         )
     }
+}
+
+/** 类型筛选按钮的图标（图标即当前状态）。 */
+private fun filterIconRes(filter: String): Int = when (filter) {
+    FILTER_PDF -> R.drawable.ic_file_pdf
+    FILTER_FOLDER -> R.drawable.ic_folder
+    else -> R.drawable.ic_apps
+}
+
+/** 类型筛选按钮的提示文案。 */
+private fun filterLabelRes(filter: String): Int = when (filter) {
+    FILTER_PDF -> R.string.explorer_filter_pdf
+    FILTER_FOLDER -> R.string.explorer_filter_folder
+    else -> R.string.explorer_filter_all
 }
 
 /** 工具控件的小方框（与探索页 / 任务页一致）。 */
@@ -709,6 +887,138 @@ private fun ToolBox(onClick: () -> Unit, content: @Composable () -> Unit) {
 }
 
 /**
+ * 方格视图的一个格子：封面 + 标题 + 左上角「文件夹 / PDF」角标。
+ *
+ * 点一下即选中 / 取消（高亮边框），与列表视图的勾选框等价。
+ * 封面直接取本地内容：图片文件夹用第一张图，PDF 用系统 `PdfRenderer` 渲染第一页。
+ */
+@Composable
+private fun GridCell(
+    path: String,
+    title: String,
+    typeRes: Int,
+    isFolder: Boolean,
+    selected: Boolean,
+    onToggle: () -> Unit,
+) {
+    var cover by remember(path) { mutableStateOf<ImageBitmap?>(null) }
+    LaunchedEffect(path) {
+        if (cover == null) {
+            cover = withContext(Dispatchers.IO) { loadExplorerCover(path, isFolder) }
+        }
+    }
+    Column(
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .border(
+                width = 2.dp,
+                color = if (selected) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.outlineVariant,
+                shape = RoundedCornerShape(8.dp),
+            )
+            .clickable(onClick = onToggle)
+            .padding(6.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(0.75f)
+                .clip(RoundedCornerShape(4.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant),
+        ) {
+            val image = cover
+            if (image != null) {
+                Image(
+                    bitmap = image,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else {
+                Icon(
+                    painter = painterResource(
+                        if (isFolder) R.drawable.ic_folder else R.drawable.ic_file_pdf
+                    ),
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.align(Alignment.Center).size(28.dp),
+                )
+            }
+            // 左上角角标：标出这一格是「文件夹」还是「PDF」
+            Text(
+                text = stringResource(typeRes),
+                style = MaterialTheme.typography.labelSmall,
+                color = Color.White,
+                maxLines = 1,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(4.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(Color.Black.copy(alpha = 0.72f))
+                    .padding(horizontal = 4.dp, vertical = 1.dp),
+            )
+        }
+        Text(
+            text = title,
+            style = MaterialTheme.typography.labelSmall,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+/** 取封面：图片文件夹用第一张图；PDF 用系统 PdfRenderer 渲染第一页。 */
+private fun loadExplorerCover(path: String, isFolder: Boolean): ImageBitmap? = try {
+    val file = File(path)
+    val bitmap = if (isFolder) {
+        val first = file.listFiles()
+            ?.sortedBy { it.name }
+            ?.firstOrNull { it.isFile && it.extension.lowercase() in COVER_IMAGE_EXTS }
+        first?.let { decodeSampledBitmap(it.readBytes(), COVER_TARGET_PX) }
+    } else {
+        renderPdfFirstPage(file, COVER_TARGET_PX)
+    }
+    bitmap?.asImageBitmap()
+} catch (_: Throwable) {
+    null
+}
+
+private fun renderPdfFirstPage(file: File, targetPx: Int): Bitmap? = try {
+    ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
+        PdfRenderer(descriptor).use { renderer ->
+            if (renderer.pageCount <= 0) {
+                null
+            } else {
+                renderer.openPage(0).use { page ->
+                    val width = targetPx
+                    val height = maxOf(1, targetPx * page.height / page.width)
+                    val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                    bitmap.eraseColor(android.graphics.Color.WHITE)
+                    page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                    bitmap
+                }
+            }
+        }
+    }
+} catch (_: Throwable) {
+    null
+}
+
+/** 按目标宽度抽样解码（封面只当缩略图用，不必原尺寸）。 */
+private fun decodeSampledBitmap(bytes: ByteArray, targetPx: Int): Bitmap? {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    if (bounds.outWidth <= 0) return null
+    var sample = 1
+    while (bounds.outWidth / (sample * 2) >= targetPx) {
+        sample *= 2
+    }
+    val options = BitmapFactory.Options().apply { inSampleSize = sample }
+    return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+}
+
+/**
  * 一条扫描结果：同一本漫画可能同时有图片文件夹与 PDF。
  *
  * - 只有一种时直接平铺成一行（桌面版同样不再多套一层折叠菜单）；
@@ -717,18 +1027,20 @@ private fun ToolBox(onClick: () -> Unit, content: @Composable () -> Unit) {
 @Composable
 private fun EntryGroup(
     entry: LibraryEntry,
+    filter: String,
     checked: Set<String>,
     onToggle: (String) -> Unit,
 ) {
-    val pdfOnly = entry.pdf.isNotEmpty() && entry.folder.isEmpty()
-    val folderOnly = entry.folder.isNotEmpty() && entry.pdf.isEmpty()
-    if (pdfOnly || folderOnly) {
-        val path = if (pdfOnly) entry.pdf else entry.folder
+    val showFolder = entry.folder.isNotEmpty() && showsKind(filter, folder = true)
+    val showPdf = entry.pdf.isNotEmpty() && showsKind(filter, folder = false)
+    if (showFolder != showPdf) {
+        // 只剩一种格式时直接平铺，不再多套一层标题
+        val path = if (showFolder) entry.folder else entry.pdf
         EntryRow(
             path = path,
             title = entry.name,
-            typeRes = if (pdfOnly) R.string.explorer_type_pdf else R.string.explorer_type_folder,
-            iconRes = if (pdfOnly) R.drawable.ic_file_pdf else R.drawable.ic_folder,
+            typeRes = if (showFolder) R.string.explorer_type_folder else R.string.explorer_type_pdf,
+            iconRes = if (showFolder) R.drawable.ic_folder else R.drawable.ic_file_pdf,
             checked = path in checked,
             onToggle = { onToggle(path) },
             indent = false,
@@ -743,7 +1055,7 @@ private fun EntryGroup(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.padding(start = 4.dp, top = 6.dp, bottom = 2.dp),
         )
-        if (entry.folder.isNotEmpty()) {
+        if (showFolder) {
             EntryRow(
                 path = entry.folder,
                 title = entry.folder.substringAfterLast('/'),
@@ -754,7 +1066,7 @@ private fun EntryGroup(
                 indent = true,
             )
         }
-        if (entry.pdf.isNotEmpty()) {
+        if (showPdf) {
             EntryRow(
                 path = entry.pdf,
                 title = entry.pdf.substringAfterLast('/'),
@@ -766,6 +1078,18 @@ private fun EntryGroup(
             )
         }
     }
+}
+
+/**
+ * 当前筛选下是否显示某一类格式。
+ *
+ * 一本漫画常常 PDF 与图片文件夹都在，「仅 PDF / 仅文件夹」必须落到**单个条目**上，
+ * 只按「整本有没有该格式」过滤的话，两种筛选看起来会和「全部」一模一样。
+ */
+private fun showsKind(filter: String, folder: Boolean): Boolean = when (filter) {
+    FILTER_PDF -> !folder
+    FILTER_FOLDER -> folder
+    else -> true
 }
 
 /** 一条可勾选的行：复选框 + 文件名 + 类型。整行可点，点哪都能切勾选。 */
@@ -839,4 +1163,40 @@ private fun sortLabelRes(key: String): Int = when (key) {
     "size" -> R.string.explorer_sort_size
     "pages" -> R.string.explorer_sort_pages
     else -> R.string.explorer_sort_name
+}
+
+/**
+ * 把所选 SAF Uri 的内容写到应用缓存，再交给 Python 复制进下载目录并写元数据。
+ *
+ * 为什么不直接把 Uri 交给 Python：Python 打不开 `content://`，而下载目录是应用私有外部目录，
+ * 在 Kotlin 侧用缓存落地一次再由 Python 复制，比让两端都去处理 SAF 简单得多。
+ * 临时文件无论如何都会在结束时删掉。
+ */
+private suspend fun copyAndImport(context: Context, uri: Uri): ApiResult<ImportedPdf> =
+    withContext(Dispatchers.IO) {
+        val temp = File(context.cacheDir, "import_${System.currentTimeMillis()}.pdf")
+        try {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                temp.outputStream().use { output -> input.copyTo(output) }
+            } ?: return@withContext ApiResult.Err("无法读取所选文件")
+            ApiBridge.importPdf(temp.absolutePath, queryDisplayName(context, uri))
+        } catch (error: Throwable) {
+            ApiResult.Err(error.message ?: error.toString())
+        } finally {
+            temp.delete()
+        }
+    }
+
+/** 从 SAF Uri 取显示文件名（取不到就给一个兜底名，Python 侧还会再补 .pdf 后缀）。 */
+private fun queryDisplayName(context: Context, uri: Uri): String {
+    var name = ""
+    try {
+        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (index >= 0 && cursor.moveToFirst()) name = cursor.getString(index).orEmpty()
+        }
+    } catch (_: Throwable) {
+        name = ""
+    }
+    return name.ifEmpty { "imported.pdf" }
 }

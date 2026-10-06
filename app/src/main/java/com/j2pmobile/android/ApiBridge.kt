@@ -215,6 +215,13 @@ data class LibraryListData(
     val needsMetadata: Boolean,
 )
 
+/** 导入外部 PDF 的结果：落盘文件名、绝对路径与刚分配的本子 ID。 */
+data class ImportedPdf(
+    val name: String,
+    val path: String,
+    val albumId: String,
+)
+
 /**
  * 一个浏览会话：Python 侧登记的句柄 + 名称 + 页数。
  *
@@ -225,10 +232,26 @@ data class LibraryListData(
 data class ReaderSource(
     val handle: String,
     val name: String,
+    val albumId: String,
+    /** 是否在线本子（本地 PDF / 图片文件夹为 false）：决定阅读页是否显示「切换加载源」。 */
+    val online: Boolean,
     val pageCount: Int,
     val numberedPages: Boolean,
+    val chapters: Int,
     val width: Int,
     val height: Int,
+)
+
+/** 一章（在线本子的章节挑选用）：标题 + 起始全局页号（0 起）+ 页数。 */
+data class ChapterItem(val title: String, val start: Int, val pages: Int)
+
+/** 一条书签：页码（0 起）、备注、创建与更新时间（秒级时间戳）。 */
+data class BookmarkItem(
+    val id: String,
+    val page: Int,
+    val note: String,
+    val created: Long,
+    val updated: Long,
 )
 
 /**
@@ -237,6 +260,12 @@ data class ReaderSource(
  * 用普通类而非 data class：`ByteArray` 的 equals 是引用比较。
  */
 class ReaderImage(val data: ByteArray, val width: Int, val height: Int, val name: String)
+
+/** 一个加载源节点：序号只是本次测速的排序结果（不与具体域名绑定）+ 延迟毫秒。 */
+data class SourceNode(val index: Int, val delay: Int)
+
+/** 加载源快照：可用节点（按延迟升序）+ 当前节点序号（0 表示还没测速过）。 */
+data class SourceState(val nodes: List<SourceNode>, val current: Int)
 
 /** PDF 里的漫画元数据（资源管理器侧栏）。字段缺失时为空串。 */
 data class PdfMeta(
@@ -645,6 +674,25 @@ object ApiBridge {
         ApiResult.Ok(result.optInt("count"))
     }
 
+    /**
+     * 导入外部 PDF：把 [tempPath]（Kotlin 侧已写好的临时文件）复制进下载目录，
+     * 分配一个新的八位本子 ID 并写进 PDF 元数据。
+     */
+    suspend fun importPdf(tempPath: String, displayName: String): ApiResult<ImportedPdf> =
+        withContext(Dispatchers.IO) {
+            val result = PythonBridge.call("import_pdf", tempPath, displayName)
+            if (!result.optBoolean("ok")) {
+                return@withContext ApiResult.Err(result.optString("error").ifEmpty { "unknown error" })
+            }
+            ApiResult.Ok(
+                ImportedPdf(
+                    name = result.optString("name"),
+                    path = result.optString("path"),
+                    albumId = result.optString("album_id"),
+                )
+            )
+        }
+
     // ---------------------------------------------------------------- 阅读器
 
     /**
@@ -702,6 +750,121 @@ object ApiBridge {
         }
         ApiResult.Ok(Unit)
     }
+
+    // ---- 加载源（禁漫 API 域名节点）----
+
+    /** 当前加载源快照：只读，不联网。 */
+    suspend fun sourceState(): ApiResult<SourceState> = withContext(Dispatchers.IO) {
+        val result = PythonBridge.call("source_state")
+        if (!result.optBoolean("ok")) {
+            return@withContext ApiResult.Err(result.optString("error").ifEmpty { "unknown error" })
+        }
+        ApiResult.Ok(result.toSourceState())
+    }
+
+    /** 测一次所有候选源并按延迟排序（单源最多 3 秒），延迟最低的成为当前节点。 */
+    suspend fun sourceRefresh(): ApiResult<SourceState> = withContext(Dispatchers.IO) {
+        val result = PythonBridge.call("source_refresh")
+        if (!result.optBoolean("ok")) {
+            return@withContext ApiResult.Err(result.optString("error").ifEmpty { "unknown error" })
+        }
+        ApiResult.Ok(result.toSourceState())
+    }
+
+    /** 按节点序号切换加载源（只影响之后的新请求）。 */
+    suspend fun sourceSelect(index: Int): ApiResult<SourceState> = withContext(Dispatchers.IO) {
+        val result = PythonBridge.call("source_select", index)
+        if (!result.optBoolean("ok")) {
+            return@withContext ApiResult.Err(result.optString("error").ifEmpty { "unknown error" })
+        }
+        ApiResult.Ok(result.toSourceState())
+    }
+
+    /** 阅读器标题点击后的资料弹窗（在线本子 / 本地 PDF / 图片文件夹统一成同一组字段）。 */
+    suspend fun readerMeta(handle: String): ApiResult<PdfMeta?> = withContext(Dispatchers.IO) {
+        val result = PythonBridge.call("reader_meta", handle)
+        if (!result.optBoolean("ok")) {
+            return@withContext ApiResult.Err(result.optString("error").ifEmpty { "unknown error" })
+        }
+        val meta = result.optJSONObject("meta")
+            ?: return@withContext ApiResult.Ok(null)
+        ApiResult.Ok(
+            PdfMeta(
+                title = meta.optString("title"),
+                albumId = meta.optString("album_id"),
+                author = meta.optString("author"),
+                tags = meta.optString("tags"),
+                pages = meta.optString("pages"),
+                chapter = meta.optString("chapter"),
+            )
+        )
+    }
+
+    /** 章节列表（在线多章本子；本地单章文件回空列表）。首次调用要联网逐章取页数。 */
+    suspend fun readerChapters(handle: String): ApiResult<List<ChapterItem>> =
+        withContext(Dispatchers.IO) {
+            val result = PythonBridge.call("reader_chapters", handle)
+            if (!result.optBoolean("ok")) {
+                return@withContext ApiResult.Err(result.optString("error").ifEmpty { "unknown error" })
+            }
+            val array = result.optJSONArray("chapters")
+            val items = ArrayList<ChapterItem>(array?.length() ?: 0)
+            if (array != null) {
+                for (index in 0 until array.length()) {
+                    val row = array.optJSONObject(index) ?: continue
+                    items.add(
+                        ChapterItem(
+                            title = row.optString("title"),
+                            start = row.optInt("start"),
+                            pages = row.optInt("pages"),
+                        )
+                    )
+                }
+            }
+            ApiResult.Ok(items)
+        }
+
+    // ---------------------------------------------------------------- 书签
+
+    /** 读取当前本子的全部书签（每次打开书签页都以磁盘文件为准）。 */
+    suspend fun bookmarkLoad(handle: String): ApiResult<List<BookmarkItem>> =
+        withContext(Dispatchers.IO) {
+            val result = PythonBridge.call("bookmark_load", handle)
+            if (!result.optBoolean("ok")) {
+                return@withContext ApiResult.Err(result.optString("error").ifEmpty { "unknown error" })
+            }
+            ApiResult.Ok(result.optJSONArray("items").toBookmarks())
+        }
+
+    /** 新增一条书签（page 为 0 起的页号）。 */
+    suspend fun bookmarkAdd(handle: String, page: Int, note: String): ApiResult<Unit> =
+        withContext(Dispatchers.IO) {
+            val result = PythonBridge.call("bookmark_add", handle, page.toString(), note)
+            if (!result.optBoolean("ok")) {
+                return@withContext ApiResult.Err(result.optString("error").ifEmpty { "unknown error" })
+            }
+            ApiResult.Ok(Unit)
+        }
+
+    /** 修改一条书签的备注（更新时间一并刷新）。 */
+    suspend fun bookmarkUpdate(handle: String, id: String, note: String): ApiResult<Unit> =
+        withContext(Dispatchers.IO) {
+            val result = PythonBridge.call("bookmark_update", handle, id, note)
+            if (!result.optBoolean("ok")) {
+                return@withContext ApiResult.Err(result.optString("error").ifEmpty { "unknown error" })
+            }
+            ApiResult.Ok(Unit)
+        }
+
+    /** 删除一条书签。 */
+    suspend fun bookmarkDelete(handle: String, id: String): ApiResult<Unit> =
+        withContext(Dispatchers.IO) {
+            val result = PythonBridge.call("bookmark_delete", handle, id)
+            if (!result.optBoolean("ok")) {
+                return@withContext ApiResult.Err(result.optString("error").ifEmpty { "unknown error" })
+            }
+            ApiResult.Ok(Unit)
+        }
 
     // ---------------------------------------------------------------- 账号
 
@@ -860,11 +1023,24 @@ object ApiBridge {
 private fun JSONObject.toReaderSource(): ReaderSource = ReaderSource(
     handle = optString("handle"),
     name = optString("name"),
+    albumId = optString("album_id"),
+    online = optBoolean("online", false),
     pageCount = optInt("page_count"),
     numberedPages = optBoolean("numbered_pages", true),
+    chapters = optInt("chapters", 1),
     width = optInt("width"),
     height = optInt("height"),
 )
+
+private fun JSONObject.toSourceState(): SourceState {
+    val array = optJSONArray("nodes")
+    val nodes = ArrayList<SourceNode>(array?.length() ?: 0)
+    for (i in 0 until (array?.length() ?: 0)) {
+        val item = array?.optJSONObject(i) ?: continue
+        nodes.add(SourceNode(index = item.optInt("index"), delay = item.optInt("delay")))
+    }
+    return SourceState(nodes = nodes, current = optInt("current"))
+}
 
 private fun JSONObject.toAccountProfile(): AccountProfile = AccountProfile(
     username = optString("username"),
@@ -907,5 +1083,23 @@ private fun JSONArray?.toStringList(): List<String> {
     if (this == null) return emptyList()
     val out = ArrayList<String>(length())
     for (index in 0 until length()) out.add(optString(index))
+    return out
+}
+
+private fun JSONArray?.toBookmarks(): List<BookmarkItem> {
+    if (this == null) return emptyList()
+    val out = ArrayList<BookmarkItem>(length())
+    for (index in 0 until length()) {
+        val row = optJSONObject(index) ?: continue
+        out.add(
+            BookmarkItem(
+                id = row.optString("id"),
+                page = row.optInt("page"),
+                note = row.optString("note"),
+                created = row.optLong("created"),
+                updated = row.optLong("updated"),
+            )
+        )
+    }
     return out
 }

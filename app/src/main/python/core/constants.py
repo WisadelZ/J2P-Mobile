@@ -20,7 +20,7 @@
 """
 
 APP_NAME = "J2P Mobile"
-APP_VERSION = "v2.4.3-android.beta.1"
+APP_VERSION = "v2.4.4"
 
 # 项目信息（帮助页展示用）
 APP_AUTHOR = "WisadelZ"

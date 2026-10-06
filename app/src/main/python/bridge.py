@@ -34,10 +34,12 @@ import base64
 import json
 import logging
 import os
+import shutil
 import sys
 import threading
 import time
 import traceback
+import uuid
 
 import core.config as config
 from core import constants, logging_bridge
@@ -206,6 +208,7 @@ def update_config(partial_json):
 # ---------------------------------------------------------------------------
 
 _search_client = None
+_search_epoch = -1              # 建上面这个客户端时的加载源代次（切源后重建）
 _search_cache = {}              # (mode, keyword, sort, time, lib_page) -> (items, total)
 _SEARCH_CACHE_MAX = 2           # 与桌面版一致：只留最近两个库页
 _SEARCH_PER_UI_PAGE = 20        # 界面每页条数（库每页 80 条）
@@ -215,12 +218,15 @@ def _search_client_instance():
     """复用同一个检索客户端。
 
     每次 ``new_jm_client`` 都要先请求一次 ``/setting``（还要维护域名与 cookies），
-    逐页新建的代价不小；检索只读，复用一个是安全的。
+    逐页新建的代价不小；检索只读，复用一个是安全的。切换加载源后按代次重建，
+    否则新请求仍会走旧域名。
     """
-    global _search_client
-    if _search_client is None:
-        from core import explore as explore_mod
+    global _search_client, _search_epoch
+    from core import sources
+    from core import explore as explore_mod
+    if _search_client is None or _search_epoch != sources.epoch():
         _search_client = explore_mod.new_client(config.load_conf())
+        _search_epoch = sources.epoch()
     return _search_client
 
 
@@ -853,7 +859,10 @@ def library_pdf_meta(pdf_path):
 
 
 def library_delete(paths_json):
-    """把选中的文件 / 文件夹移入回收站（可从回收站还原）。"""
+    """把选中的文件 / 文件夹移入回收站（可从回收站还原）。
+
+    删 PDF 时顺手清掉它的书签文件（同一本子还有其它 PDF 时保留）。
+    """
     try:
         from core import library
         paths = json.loads(paths_json) if paths_json else []
@@ -862,8 +871,207 @@ def library_delete(paths_json):
         paths = [str(path) for path in paths if str(path).strip()]
         if not paths:
             raise ValueError("请先勾选要删除的项目")
+        # 书签要在删除前按 PDF 元数据定位（移进回收站后就读不到了）
+        album_ids = _pdf_album_ids(paths)
         library.delete_to_recycle_bin(paths)
+        _drop_orphan_bookmarks(album_ids)
         return _ok(count=len(paths))
+    except Exception as exc:
+        return _fail(exc)
+
+
+def _pdf_album_ids(paths):
+    """待删除路径里 PDF 对应的本子 ID（读不到元数据的忽略）。"""
+    ids = set()
+    try:
+        from core import pdf_metadata
+    except Exception:
+        return ids
+    for path in paths:
+        if not str(path).lower().endswith(".pdf"):
+            continue
+        try:
+            meta = pdf_metadata.read_metadata(path) or {}
+            album_id = str(meta.get("album_id") or "").strip()
+            if album_id:
+                ids.add(album_id)
+        except Exception:
+            continue
+    return ids
+
+
+def _drop_orphan_bookmarks(album_ids):
+    """PDF 删除后，下载目录里已无同一本子的 PDF 时，删掉它的书签文件。"""
+    if not album_ids:
+        return
+    try:
+        from core import pdf_metadata
+        base = config.resolve_path((config.load_conf().get("app") or {}).get("download_dir"))
+    except Exception:
+        return
+    remaining = set()
+    try:
+        names = os.listdir(base)
+    except OSError:
+        return
+    for name in names:
+        if not name.lower().endswith(".pdf"):
+            continue
+        try:
+            meta = pdf_metadata.read_metadata(os.path.join(base, name)) or {}
+            album_id = str(meta.get("album_id") or "").strip()
+            if album_id:
+                remaining.add(album_id)
+        except Exception:
+            continue
+    for album_id in album_ids - remaining:
+        safe = _safe_filename(album_id)
+        if safe:
+            _remove_quietly(os.path.join(base, "%s.json" % safe))
+
+
+# ---------------------------------------------------------------------------
+# 导入外部 PDF（资源管理器右上角的「+」）
+#
+# 复制进下载目录 → 分配一个新的八位本子 ID（从 10000000 起递增，删掉 PDF 也不复用）
+# → 把 ID 写进 PDF 元数据（DocInfo 的 Keywords，与下载生成的 PDF 一致）。
+# 因为 ID 的位置一致，后续打开该书签页时会自然以这个 ID 命名书签文件。
+# ---------------------------------------------------------------------------
+
+_IMPORT_ID_START = 10000000
+
+
+def import_pdf(temp_path, display_name=""):
+    """把外部 PDF 复制进下载目录并写入新的本子 ID；回落盘文件名、路径与 ID。"""
+    try:
+        source = str(temp_path or "").strip()
+        if not source or not os.path.isfile(source):
+            raise ValueError("导入文件不存在")
+        if not source.lower().endswith(".pdf"):
+            raise ValueError("只支持导入 PDF 文件")
+        from core import pdf_metadata
+
+        base = config.resolve_path((config.load_conf().get("app") or {}).get("download_dir"))
+        os.makedirs(base, exist_ok=True)
+        target = _unique_import_path(base, _import_name(display_name or os.path.basename(source)))
+        shutil.copyfile(source, target)
+        try:
+            album_id = _next_import_id(base)
+            pdf_metadata.write_import_metadata(
+                target, album_id, os.path.splitext(os.path.basename(target))[0])
+        except Exception:
+            # 元数据写不进去就别在下载目录里留一个「没身份」的半成品
+            _remove_quietly(target)
+            raise
+        return _ok(name=os.path.basename(target), path=target, album_id=album_id)
+    except Exception as exc:
+        return _fail(exc)
+
+
+def _import_name(name):
+    """导入文件的落盘名：去掉路径成分与非法字符，并补上 .pdf 后缀。"""
+    cleaned = _safe_filename(os.path.basename(str(name or "")))
+    if not cleaned:
+        cleaned = "imported"
+    if not cleaned.lower().endswith(".pdf"):
+        cleaned += ".pdf"
+    return cleaned
+
+
+def _unique_import_path(base_dir, name):
+    """同名时加「 (2)」「 (3)」后缀，绝不覆盖下载目录里已有的文件。"""
+    stem, ext = os.path.splitext(name)
+    candidate = os.path.join(base_dir, name)
+    index = 2
+    while os.path.exists(candidate):
+        candidate = os.path.join(base_dir, "%s (%d)%s" % (stem, index, ext))
+        index += 1
+    return candidate
+
+
+def _import_seq_path():
+    """导入 ID 的计数器文件（放配置目录，不随下载目录清理而丢）。"""
+    return os.path.join(config.config_dir(), "import_seq.json")
+
+
+def _existing_album_ids(base_dir):
+    """下载目录里现有 PDF 的本子 ID（导入前避让用，防止计数器丢失后撞号）。"""
+    ids = set()
+    try:
+        names = os.listdir(base_dir)
+    except OSError:
+        return ids
+    from core import pdf_metadata
+    for name in names:
+        if not name.lower().endswith(".pdf"):
+            continue
+        try:
+            meta = pdf_metadata.read_metadata(os.path.join(base_dir, name)) or {}
+            album_id = str(meta.get("album_id") or "").strip()
+            if album_id:
+                ids.add(album_id)
+        except Exception:
+            continue
+    return ids
+
+
+def _next_import_id(base_dir):
+    """分配下一个八位本子 ID：从 10000000 起递增，**用过的号不再复用**。
+
+    计数器落在配置目录（删掉 PDF 也不会回退）；即便计数器被清掉，也会避让下载目录
+    里现有的 ID，尽量不撞号。
+    """
+    last = _IMPORT_ID_START - 1
+    path = _import_seq_path()
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            data = json.load(file)
+        last = max(last, int((data or {}).get("last") or last))
+    except Exception:
+        pass
+    used = _existing_album_ids(base_dir)
+    candidate = last + 1
+    while str(candidate) in used:
+        candidate += 1
+    try:
+        with open(path, "w", encoding="utf-8") as file:
+            json.dump({"last": candidate}, file)
+    except Exception:
+        pass
+    return str(candidate)
+
+
+# ---------------------------------------------------------------------------
+# 加载源（禁漫移动端 API 域名节点）
+#
+# 测速要在后台线程里跑（单源最多 3 秒），界面只拿序号与延迟，不接触域名。
+# ---------------------------------------------------------------------------
+
+
+def source_state():
+    """当前加载源节点的快照（只读，不联网）：节点序号 + 延迟 + 当前节点。"""
+    try:
+        from core import sources
+        return _ok(**sources.snapshot())
+    except Exception as exc:
+        return _fail(exc)
+
+
+def source_refresh():
+    """测一次所有候选源并按延迟排序，延迟最低的设为当前节点。"""
+    try:
+        from core import sources
+        return _ok(**sources.refresh(config.load_conf()))
+    except Exception as exc:
+        return _fail(exc)
+
+
+def source_select(index):
+    """按节点序号切换加载源（只影响之后的新请求）。"""
+    try:
+        from core import sources
+        switched = sources.select(index)
+        return _ok(switched=bool(switched), **sources.snapshot())
     except Exception as exc:
         return _fail(exc)
 
@@ -905,6 +1113,28 @@ def _reader_first_size(doc):
     return _READER_FALLBACK_SIZE
 
 
+def _reader_chapter_count(doc):
+    """会话里的章节数（本地 PDF / 图片文件夹都是单章；在线本子取章节列表长度）。
+
+    只用来决定底栏「章节」按钮是否可用，不触发任何联网请求。
+    """
+    album = getattr(doc, "_album", None)
+    if album is None:
+        return 1
+    try:
+        return max(1, len(album))
+    except Exception:
+        return 1
+
+
+def _reader_session(handle):
+    """按句柄取浏览会话，已结束时报错（由界面提示用户）。"""
+    doc = _reader_sessions.get(str(handle))
+    if doc is None:
+        raise ValueError("浏览会话已结束")
+    return doc
+
+
 def reader_open_local(path):
     """打开本地 PDF 或图片文件夹，返回会话句柄与页面信息。
 
@@ -923,8 +1153,11 @@ def reader_open_local(path):
         return _ok(
             handle=_reader_register(doc),
             name=doc.name,
+            album_id=str(getattr(doc, "album_id", "") or ""),
+            online=False,
             page_count=int(doc.page_count),
             numbered_pages=bool(doc.numbered_pages),
+            chapters=_reader_chapter_count(doc),
             width=width,
             height=height,
         )
@@ -944,8 +1177,11 @@ def reader_open_online(album_id):
         return _ok(
             handle=_reader_register(doc),
             name=doc.name or "",
+            album_id=str(getattr(doc, "album_id", "") or aid),
+            online=True,
             page_count=int(doc.page_count),
             numbered_pages=True,
+            chapters=_reader_chapter_count(doc),
             width=width,
             height=height,
         )
@@ -986,6 +1222,193 @@ def reader_close(handle):
     try:
         with _reader_lock:
             _reader_sessions.pop(str(handle), None)
+        return _ok()
+    except Exception as exc:
+        return _fail(exc)
+
+
+def reader_meta(handle):
+    """阅读器标题点击后的资料弹窗：三种来源统一成与资源管理器一致的一组字段。"""
+    try:
+        doc = _reader_session(handle)
+        title = str(getattr(doc, "name", "") or "")
+        album_id = str(getattr(doc, "album_id", "") or "")
+        author = ""
+        tags = ""
+        chapter = ""
+        pages = str(int(getattr(doc, "page_count", 0) or 0))
+        if getattr(doc, "kind", "") == "pdf":
+            from core import pdf_metadata
+            meta = pdf_metadata.read_metadata(getattr(doc, "path", "")) or {}
+            title = meta.get("title") or title
+            album_id = str(meta.get("album_id") or album_id)
+            author = meta.get("author") or ""
+            tags = meta.get("tags") or ""
+            pages = str(meta.get("pages") or pages)
+            chapter = str(meta.get("chapter") or "")
+        else:
+            album = getattr(doc, "_album", None)
+            if album is not None:
+                title = str(getattr(album, "name", "") or title)
+                author = ", ".join(str(name) for name in (getattr(album, "authors", None) or []))
+                tags = _tags_text(getattr(album, "tags", None))
+        return _ok(meta={
+            "title": title,
+            "album_id": album_id,
+            "author": author,
+            "tags": tags,
+            "pages": pages,
+            "chapter": chapter,
+        })
+    except Exception as exc:
+        return _fail(exc)
+
+
+def reader_chapters(handle):
+    """章节列表（标题 + 起始全局页号 + 页数）；本地单章文件回空列表。"""
+    try:
+        doc = _reader_session(handle)
+        if hasattr(doc, "chapters"):
+            return _ok(chapters=doc.chapters())
+        return _ok(chapters=[])
+    except Exception as exc:
+        return _fail(exc)
+
+
+# ---------------------------------------------------------------------------
+# 书签（在线阅读页与本地浏览共用；按本子 ID 落一个 JSON 到下载目录）
+#
+# 文件形如 ``<下载目录>/<本子ID>.json``：``{"album_id": "...", "items": [...]}``，
+# 每条书签记录 ``id / page（0 起的页号）/ note / created / updated``（时间戳为秒）。
+# 首次新增书签时才创建文件；删到没有书签时把文件一并删掉。
+# ---------------------------------------------------------------------------
+
+def _bookmark_key(doc):
+    """书签文件名用的标识：优先本子 ID，取不到退回文件 / 文件夹名。"""
+    key = ""
+    if getattr(doc, "kind", "") == "pdf":
+        try:
+            from core import pdf_metadata
+            meta = pdf_metadata.read_metadata(getattr(doc, "path", "")) or {}
+            key = str(meta.get("album_id") or "").strip()
+        except Exception:
+            key = ""
+    else:
+        key = str(getattr(doc, "album_id", "") or "").strip()
+    if not key:
+        name = os.path.basename(str(getattr(doc, "path", "") or "")) \
+            or str(getattr(doc, "name", "") or "")
+        key = os.path.splitext(name)[0]
+    return _safe_filename(key) or "bookmarks"
+
+
+def _safe_filename(name):
+    """把标识里的路径分隔符与非法字符去掉（避免拼出目录穿越的文件名）。"""
+    return "".join(ch for ch in str(name or "") if ch not in '\\/:*?"<>|').strip()
+
+
+def _bookmark_file(doc):
+    """书签文件路径（下载目录下、以本子 ID 命名）。"""
+    base = config.resolve_path((config.load_conf().get("app") or {}).get("download_dir"))
+    return os.path.join(base, "%s.json" % _bookmark_key(doc))
+
+
+def _read_bookmarks(path):
+    """读书签文件；文件不存在或损坏时回空列表（不让坏文件挡住阅读）。"""
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            data = json.load(file)
+    except Exception:
+        return []
+    if isinstance(data, dict):
+        data = data.get("items")
+    items = []
+    for row in (data or []):
+        if not isinstance(row, dict) or not row.get("id"):
+            continue
+        items.append({
+            "id": str(row.get("id")),
+            "page": int(row.get("page") or 0),
+            "note": str(row.get("note") or ""),
+            "created": int(row.get("created") or 0),
+            "updated": int(row.get("updated") or 0),
+        })
+    return items
+
+
+def _write_bookmarks(path, album_id, items):
+    """原子写回书签文件（先写临时文件再替换，避免中途失败留下半个文件）。"""
+    base_dir = os.path.dirname(path)
+    if base_dir and not os.path.isdir(base_dir):
+        os.makedirs(base_dir, exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as file:
+        json.dump({"album_id": album_id, "items": items}, file, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def bookmark_load(handle):
+    """读取当前本子的全部书签（打开书签页时调用，每次都以文件为准）。"""
+    try:
+        doc = _reader_session(handle)
+        return _ok(items=_read_bookmarks(_bookmark_file(doc)))
+    except Exception as exc:
+        return _fail(exc)
+
+
+def bookmark_add(handle, page, note=""):
+    """新增一条书签（首次会创建 ``<本子ID>.json``）。"""
+    try:
+        doc = _reader_session(handle)
+        path = _bookmark_file(doc)
+        items = _read_bookmarks(path)
+        now = int(time.time())
+        item = {
+            "id": uuid.uuid4().hex,
+            "page": max(0, int(page)),
+            "note": str(note or ""),
+            "created": now,
+            "updated": now,
+        }
+        items.append(item)
+        _write_bookmarks(path, str(getattr(doc, "album_id", "") or ""), items)
+        return _ok(item=item)
+    except Exception as exc:
+        return _fail(exc)
+
+
+def bookmark_update(handle, bookmark_id, note=""):
+    """修改一条书签的备注（更新时间一并刷新）。"""
+    try:
+        doc = _reader_session(handle)
+        path = _bookmark_file(doc)
+        items = _read_bookmarks(path)
+        now = int(time.time())
+        found = False
+        for item in items:
+            if item["id"] == str(bookmark_id):
+                item["note"] = str(note or "")
+                item["updated"] = now
+                found = True
+        if found:
+            _write_bookmarks(path, str(getattr(doc, "album_id", "") or ""), items)
+        return _ok(updated=found)
+    except Exception as exc:
+        return _fail(exc)
+
+
+def bookmark_delete(handle, bookmark_id):
+    """删除一条书签；删空后把书签文件一并删掉。"""
+    try:
+        doc = _reader_session(handle)
+        path = _bookmark_file(doc)
+        items = [item for item in _read_bookmarks(path) if item["id"] != str(bookmark_id)]
+        if items:
+            _write_bookmarks(path, str(getattr(doc, "album_id", "") or ""), items)
+        else:
+            _remove_quietly(path)
         return _ok()
     except Exception as exc:
         return _fail(exc)
