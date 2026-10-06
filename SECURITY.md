@@ -2,7 +2,7 @@
 
 本文件说明 J2P Mobile 的安全边界、数据处理方式以及漏洞报告流程。
 
-- 当前版本：v2.4.3-android.beta.1
+- 当前版本：v2.4.4
 - 项目地址：https://github.com/WisadelZ/J2P-Mobile
 - 许可证：GPL-3.0-or-later
 
@@ -12,7 +12,8 @@
 
 | 版本 | 是否支持 |
 | --- | --- |
-| v2.4.3-android.beta.1（最新） | ✅ |
+| v2.4.4（最新） | ✅ |
+| v2.4.3-android.beta.N 及更早 | ❌ |
 
 ## 报告安全漏洞
 
