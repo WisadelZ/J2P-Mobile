@@ -1,4 +1,4 @@
-# J2P Mobile v2.4.4 - jmcomic本子探索、在线浏览与下载工具 📚
+# J2P Mobile v2.4.4-fix.1 - jmcomic本子探索、在线浏览与下载工具 📚
 
 一个开源免费的 jmcomic 本子探索、在线浏览、下载与 PDF 合并工具的**安卓版**，
 与桌面版 [Jm2PDF](https://github.com/WisadelZ/jm2pdf) 功能对应，界面按手机形态重写。
@@ -29,9 +29,9 @@
 
 1. 访问 [Releases](https://github.com/WisadelZ/J2P-Mobile/releases) 页面
 2. 按手机架构选择对应的安装包并安装（需 Android 7.0 及以上）：
-   - `J2P-Mobile-v2.4.4-arm64-v8a.apk` —— 仅 arm64-v8a（绝大多数真机选它）
-   - `J2P-Mobile-v2.4.4-x86_64.apk` —— 仅 x86_64
-   - `J2P-Mobile-v2.4.4.apk` —— 双架构（文件名不带架构名）
+   - `J2P-Mobile-v2.4.4-fix.1-arm64-v8a.apk` —— 仅 arm64-v8a（绝大多数真机选它）
+   - `J2P-Mobile-v2.4.4-fix.1-x86_64.apk` —— 仅 x86_64
+   - `J2P-Mobile-v2.4.4-fix.1.apk` —— 双架构（文件名不带架构名）
 
 > **如果你清楚你的手机架构，请选择对应架构安装包来安装，因为体积最小；如果你不清楚，当然也可以直接下载不带架构名的安装包，只是体积略大，无伤大雅。**
 

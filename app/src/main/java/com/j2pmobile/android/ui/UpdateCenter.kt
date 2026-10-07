@@ -45,6 +45,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.j2pmobile.android.ApiBridge
 import com.j2pmobile.android.Platform
 import com.j2pmobile.android.R
 import com.j2pmobile.android.UpdateService
@@ -59,7 +60,19 @@ import java.io.File
 import java.util.Locale
 
 /** 更新弹窗当前所处的阶段。 */
-enum class UpdateStage { CHECKING, NO_UPDATE, FOUND, PICK_SOURCE, DOWNLOADING, DONE, FAILED, NO_SOURCE }
+enum class UpdateStage {
+    CHECKING,
+    NO_UPDATE,
+    FOUND,
+    PICK_SOURCE,
+    DOWNLOADING,
+    DONE,
+    FAILED,
+    NO_SOURCE,
+
+    /** 软件已是最新、但装了新的热更补丁：提示「重启后生效」。 */
+    HOTFIX_READY,
+}
 
 /** 更新流程的界面状态（由 [UpdateCenter] 驱动，Compose 直接读取）。 */
 class UpdateUiState {
@@ -80,6 +93,9 @@ class UpdateUiState {
     var sourceOptions by mutableStateOf(emptyList<Updater.Candidate>())
     var pickedSource by mutableStateOf("")
     var testing by mutableStateOf(false)
+
+    /** 热更补丁已就绪：新的资源版本（提示「重启后生效」）。 */
+    var hotfixResVersion by mutableStateOf(0)
 }
 
 /**
@@ -106,6 +122,10 @@ class UpdateCenter(private val context: Context, private val scope: CoroutineSco
 
         data class Failed(val message: String) : Outcome()
         data class Latest(val version: String) : Outcome()
+
+        /** 软件已是最新，但已安装新的热更补丁（[resVersion] 为新的资源版本）。 */
+        data class HotfixReady(val resVersion: Int) : Outcome()
+
         data class Found(
             val release: Updater.Release,
             val source: Updater.Source,
@@ -140,7 +160,7 @@ class UpdateCenter(private val context: Context, private val scope: CoroutineSco
     /**
      * 当前安装包版本号（取自系统，等于 build.gradle 的 versionName）。
      *
-     * 去掉可能存在的 `v` 前缀：文案模板里自带 `v%1$s`，否则会显示成 `vv2.4.4`
+     * 去掉可能存在的 `v` 前缀：文案模板里自带 `v%1$s`，否则会显示成 `vv2.4.4-fix.1`
      * （「已是最新版本」那句就是走这里，用户实测踩到过）。
      */
     private fun currentVersion(): String = runCatching {
@@ -181,6 +201,12 @@ class UpdateCenter(private val context: Context, private val scope: CoroutineSco
                 is Outcome.Latest -> if (manual) {
                     state.latestVersion = outcome.version
                     show(UpdateStage.NO_UPDATE)
+                }
+
+                is Outcome.HotfixReady -> {
+                    // 软件已是最新、但补丁已下载安装：提示重启后生效（自动 / 手动都提示）
+                    state.hotfixResVersion = outcome.resVersion
+                    show(UpdateStage.HOTFIX_READY)
                 }
 
                 is Outcome.Found -> {
@@ -373,6 +399,12 @@ class UpdateCenter(private val context: Context, private val scope: CoroutineSco
             if (source == null) return Outcome.NoSource(manifest.netdisks, manifest.releasePage)
             if (release == null) return Outcome.Latest(currentVersion())
             if (!Updater.isNewer(release.version, currentVersion())) {
+                // 软件已是最新 → 改查热更补丁：命中且安装成功就提示重启生效；
+                // 无命中 / 网络失败 / 校验失败都静默（补丁问题不影响原有「已是最新版本」提示）
+                val patch = ApiBridge.hotfixCheck()
+                if (patch.optBoolean("found")) {
+                    return Outcome.HotfixReady(patch.optInt("res_version"))
+                }
                 return Outcome.Latest(release.version)
             }
             val asset = Updater.pickAsset(release)
@@ -418,6 +450,8 @@ fun UpdateDialogs(
     onPickSource: (String) -> Unit,
     onConfirmSource: () -> Unit,
     onRetest: () -> Unit,
+    /** 热更补丁已就绪时点「立即重启」：强制重启应用（见 [com.j2pmobile.android.forceRestart]）。 */
+    onRestart: () -> Unit,
 ) {
     if (!state.visible) return
 
@@ -576,6 +610,18 @@ fun UpdateDialogs(
                 onOpenUrl = onOpenUrl,
             )
         }
+
+        // 热更补丁已就绪：展示新的资源版本，提示「重启后生效」
+        UpdateStage.HOTFIX_READY -> UpdateShell(
+            title = stringResource(R.string.hotfix_ready_title),
+            onDismiss = onDismiss,
+            actions = {
+                TextButton(onClick = onDismiss) { Text(stringResource(R.string.btn_later)) }
+                TextButton(onClick = onRestart) { Text(stringResource(R.string.btn_restart_now)) }
+            },
+        ) {
+            Text(stringResource(R.string.hotfix_ready_body, state.hotfixResVersion))
+        }
     }
 }
 
@@ -611,7 +657,7 @@ private fun UpdateShell(
 
 /**
  * 弹窗里展示「当前版本」用：`about_version_value` 自带 `v` 前缀，
- * 而文案模板里已经有 `v%1$s`，这里去掉前缀避免出现 `vv2.4.4`。
+ * 而文案模板里已经有 `v%1$s`，这里去掉前缀避免出现 `vv2.4.4-fix.1`。
  */
 @Composable
 private fun currentVersionText(): String =

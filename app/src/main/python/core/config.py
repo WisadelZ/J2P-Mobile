@@ -39,7 +39,7 @@ CONF_HEADER = """# J2P Mobile 配置文件
 
 # 程序内兜底默认配置：磁盘配置缺失字段时以此补齐
 DEFAULT_CONF_TEXT = """
-version: v2.4.4
+version: v2.4.4-fix.1
 app:
   download_dir: ./download
   to_pdf: true

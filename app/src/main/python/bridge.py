@@ -165,6 +165,24 @@ def init(base_dir, config_dir, log_level="INFO"):
         config.ensure_conf_file()
         _language = None
 
+        # 兼容补丁与热更补丁：都只做运行时 monkeypatch，任何问题都**不影响启动**
+        # （失败只体现在下面的返回值里，由 Kotlin 侧决定是否提示用户）。
+        try:
+            from core import jmcompat
+            jmcompat.install()
+        except Exception:
+            _logger.exception("兼容补丁安装失败（不影响启动）")
+        try:
+            from core import hotfix
+            hotfix_status, hotfix_error = hotfix.load_at_startup()
+            hotfix_res = hotfix.res_version()
+            hotfix_fail = hotfix.failure_count()
+        except Exception as exc:
+            hotfix_status = "error"
+            hotfix_error = "%s: %s" % (type(exc).__name__, exc)
+            hotfix_res = constants.RES_VERSION_BASE
+            hotfix_fail = 0
+
         python_version = sys.version.split()[0]
         _logger.info("Python %s 就绪", python_version)
         _logger.info("配置目录：%s", config.config_dir())
@@ -175,6 +193,10 @@ def init(base_dir, config_dir, log_level="INFO"):
         return _ok(version=constants.APP_VERSION,
                    python=python_version,
                    config_path=config.conf_path(),
+                   hotfix_status=hotfix_status,
+                   hotfix_error=hotfix_error,
+                   hotfix_res_version=hotfix_res,
+                   hotfix_fail_count=hotfix_fail,
                    config=config.load_conf())
     except Exception as exc:
         return _fail(exc)
@@ -325,6 +347,31 @@ def clear_cache():
         return _ok()
     except Exception as exc:
         return _fail(exc)
+
+
+# ---------------------------------------------------------------------------
+# 热更补丁（清单检查 / 资源版本）
+#
+# 补丁的清单拉取、下载、sha256 校验与本地安装全部在 Python 侧完成（见 core.hotfix），
+# 界面只负责「要不要提示用户重启」。任何失败都**静默**，不影响原有「已是最新版本」提示。
+# ---------------------------------------------------------------------------
+
+def hotfix_check():
+    """拉补丁清单并在命中时下载安装；无命中 / 网络失败 / 403 / JSON 非法 / 校验失败都静默。"""
+    try:
+        from core import hotfix
+        return _ok(**hotfix.check_for_update())
+    except Exception:
+        return _ok(found=False)
+
+
+def hotfix_res_version():
+    """当前资源版本（整数；无补丁为基线），供设置页「关于」展示。"""
+    try:
+        from core import hotfix
+        return _ok(res_version=hotfix.res_version())
+    except Exception:
+        return _ok(res_version=constants.RES_VERSION_BASE)
 
 
 def auto_checkin():

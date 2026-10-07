@@ -33,11 +33,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -56,10 +58,13 @@ import com.j2pmobile.android.ApiBridge
 import com.j2pmobile.android.ApiResult
 import com.j2pmobile.android.AppLocale
 import com.j2pmobile.android.LogBridge
+import com.j2pmobile.android.Platform
 import com.j2pmobile.android.R
 import com.j2pmobile.android.Updater
+import com.j2pmobile.android.forceRestart
 import kotlinx.coroutines.launch
 import org.json.JSONObject
+import java.io.File
 
 /**
  * 设置页（从账号页右上角的小齿轮进入，无独立按钮）。
@@ -106,6 +111,12 @@ fun SettingsScreen(
     /** 导出时暂存 YAML 文本，等用户选完目标文件再写。 */
     var pendingExport by remember { mutableStateOf<String?>(null) }
 
+    /** 「清除补丁」确认框是否打开。 */
+    var clearHotfixOpen by remember { mutableStateOf(false) }
+
+    /** 资源版本（运行时读取；无补丁时用三语默认值兜底）。 */
+    var resVersion by remember { mutableStateOf("") }
+
     fun setStatus(res: Int, kind: StatusKind, arg: String? = null) {
         statusRes = res
         statusArg = arg
@@ -138,6 +149,14 @@ fun SettingsScreen(
             updateChannel = app.optString("update_channel").ifEmpty { Updater.CHANNEL_STABLE }
             autoUpdate = app.optBoolean("auto_update", false)
             previewPages = app.optBoolean("preview_pages", true)
+        }
+    }
+
+    // 资源版本：运行时从 Python 读取（无补丁时为基线 1）
+    LaunchedEffect(Unit) {
+        when (val result = ApiBridge.hotfixResVersion()) {
+            is ApiResult.Ok -> resVersion = result.value.toString()
+            is ApiResult.Err -> resVersion = ""
         }
     }
 
@@ -341,21 +360,29 @@ fun SettingsScreen(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        OutlinedButton(
-            onClick = {
-                onClearCache()
-                scope.launch {
-                    when (val result = ApiBridge.clearCache()) {
-                        is ApiResult.Ok -> setStatus(R.string.status_cache_cleared, StatusKind.OK)
-                        is ApiResult.Err -> setStatus(
-                            R.string.status_error_hint, StatusKind.ERR, result.message
-                        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(
+                onClick = {
+                    onClearCache()
+                    scope.launch {
+                        when (val result = ApiBridge.clearCache()) {
+                            is ApiResult.Ok -> setStatus(R.string.status_cache_cleared, StatusKind.OK)
+                            is ApiResult.Err -> setStatus(
+                                R.string.status_error_hint, StatusKind.ERR, result.message
+                            )
+                        }
                     }
-                }
-            },
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text(stringResource(R.string.btn_clear_cache))
+                },
+                modifier = Modifier.weight(1f),
+            ) {
+                Text(stringResource(R.string.btn_clear_cache), maxLines = 1)
+            }
+            OutlinedButton(
+                onClick = { clearHotfixOpen = true },
+                modifier = Modifier.weight(1f),
+            ) {
+                Text(stringResource(R.string.btn_clear_hotfix), maxLines = 1)
+            }
         }
 
         // ---------------- 软件更新 ----------------
@@ -420,6 +447,10 @@ fun SettingsScreen(
         Spacer(Modifier.height(4.dp))
         SectionTitle(stringResource(R.string.about_title))
         AboutRow(stringResource(R.string.help_version), stringResource(R.string.about_version_value))
+        AboutRow(
+            label = stringResource(R.string.about_res_version),
+            value = resVersion.ifEmpty { stringResource(R.string.about_res_version_value) },
+        )
         AboutRow(stringResource(R.string.help_author), stringResource(R.string.about_author_value))
         AboutRow(
             label = stringResource(R.string.help_project),
@@ -455,6 +486,29 @@ fun SettingsScreen(
         }
 
         StatusLine(statusRes, statusArg, statusKind)
+    }
+
+    // 清除补丁：确认后删除 configDir()/hotfix 整个目录并强制重启
+    if (clearHotfixOpen) {
+        AlertDialog(
+            onDismissRequest = { clearHotfixOpen = false },
+            title = { Text(stringResource(R.string.clear_hotfix_confirm_title)) },
+            text = { Text(stringResource(R.string.clear_hotfix_confirm_body)) },
+            confirmButton = {
+                TextButton(onClick = {
+                    clearHotfixOpen = false
+                    File(Platform.configDir(), "hotfix").deleteRecursively()
+                    forceRestart()
+                }) {
+                    Text(stringResource(R.string.btn_confirm))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { clearHotfixOpen = false }) {
+                    Text(stringResource(R.string.btn_cancel))
+                }
+            },
+        )
     }
 }
 

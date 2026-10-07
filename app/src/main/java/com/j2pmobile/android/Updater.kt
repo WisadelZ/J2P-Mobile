@@ -64,7 +64,18 @@ object Updater {
     const val RELEASES_URL = "https://github.com/WisadelZ/J2P-Mobile/releases"
 
     /** 更新清单（OSS 上的 update.json）的固定地址；结构与字段规则见《UPDATE-JSON.md》。 */
-    const val MANIFEST_URL = "http://getproxy.wisadelz.cn/update.json"
+    const val MANIFEST_URL = "https://getproxy.wisadelz.cn/update.json"
+
+    /**
+     * 热更补丁清单地址（OSS 上的 hotfix.json）。
+     *
+     * 端上的补丁检查 / 下载 / 安装由 Python 侧完成（见 `core/hotfix.py` 与 `bridge.hotfix_check`）；
+     * 这里登记同一个地址，便于两端常量对齐与文档检索。
+     */
+    const val HOTFIX_MANIFEST_URL = "https://getproxy.wisadelz.cn/hotfix.json"
+
+    /** 启动公告地址（Kotlin 侧静默拉取，见 [com.j2pmobile.android.NoticeCenter]）。 */
+    const val NOTICE_URL = "https://getproxy.wisadelz.cn/notice.json"
 
     /** 清单里本端的平台键（桌面端是 "windows"；两端清单文件是同一份）。 */
     private const val MANIFEST_PLATFORM = "android"
@@ -147,7 +158,7 @@ object Updater {
     // 版本
     // ------------------------------------------------------------------
 
-    /** 把 `v2.4.4` / `2.4.4-android.beta.2` 之类解析成可比较的数字列表。 */
+    /** 把 `v2.4.4-fix.1` / `2.4.4-android.beta.2` 之类解析成可比较的数字列表。 */
     fun parseVersion(text: String?): List<Int> =
         Regex("\\d+").findAll(text.orEmpty()).map { it.value.toInt() }.take(4).toList()
 
@@ -467,6 +478,13 @@ object Updater {
     // ------------------------------------------------------------------
     // HTTP 基础
     // ------------------------------------------------------------------
+
+    /** 拉取一个文本资源（公告等复用本文件的 HttpURLConnection 封装）；任何失败返回 null。 */
+    fun fetchText(url: String, timeoutMs: Int = REQUEST_TIMEOUT_MS): String? = try {
+        get(url, timeoutMs)
+    } catch (_: Throwable) {
+        null
+    }
 
     /** 发起 GET 并返回响应体；非 2xx（含 404）返回 null。 */
     private fun get(url: String, timeoutMs: Int): String? {

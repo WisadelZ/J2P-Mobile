@@ -25,7 +25,7 @@
 
     <!-- 设置底部：关于（由原帮助页并入） -->
     <string name="about_title">About</string>
-    <string name="about_version_value">v2.4.4</string>
+    <string name="about_version_value">v2.4.4-fix.1</string>
     <string name="about_author_value">WisadelZ</string>
     <string name="about_project_value">https://github.com/WisadelZ/J2P-Mobile</string>
     <string name="about_issues_value">https://github.com/WisadelZ/J2P-Mobile/issues</string>
@@ -458,4 +458,22 @@
     <string name="source_switched">Switched to node %1$d</string>
     <string name="source_empty">No loading source is available now, please try again later</string>
     <string name="btn_exit">Exit</string>
+
+    <!-- Hotfix / resource version / startup notice (v2.4.4-fix.1) -->
+    <string name="about_res_version">Resource version</string>
+    <string name="about_res_version_value">1</string>
+    <string name="hotfix_error_title">Hotfix patch failed to load</string>
+    <string name="hotfix_error_body">The hotfix patch could not be loaded: %1$s</string>
+    <string name="hotfix_error_retry_hint">You can retry, or clear the patch and restart.</string>
+    <string name="hotfix_fail_count">Failed %1$d time(s); clearing the patch is recommended.</string>
+    <string name="btn_clear_hotfix">Clear patch</string>
+    <string name="btn_restart_now">Restart now</string>
+    <string name="btn_later">Later</string>
+    <string name="hotfix_ready_title">Hotfix patch ready</string>
+    <string name="hotfix_ready_body">Resource version %1$d is ready and will take effect after restart.</string>
+    <string name="clear_hotfix_confirm_title">Clear patch</string>
+    <string name="clear_hotfix_confirm_body">This deletes the downloaded hotfix patch and restarts the app. Continue?</string>
+    <string name="notice_default_title">Notice</string>
+    <string name="notice_view_detail">View details</string>
+    <string name="notice_mute_before_update">Don\'t show again until the next update</string>
 </resources>

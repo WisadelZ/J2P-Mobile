@@ -35,10 +35,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -66,16 +69,23 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.j2pmobile.android.ApiBridge
 import com.j2pmobile.android.ApiResult
+import com.j2pmobile.android.NoticeCenter
+import com.j2pmobile.android.NoticeData
 import com.j2pmobile.android.PdfMeta
+import com.j2pmobile.android.Platform
 import com.j2pmobile.android.QueueBridge
 import com.j2pmobile.android.R
 import com.j2pmobile.android.ReaderSource
 import com.j2pmobile.android.SourceNode
 import com.j2pmobile.android.SourceState
 import com.j2pmobile.android.Updater
+import com.j2pmobile.android.forceRestart
 import com.j2pmobile.android.ui.components.CoverCache
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 
 /**
  * 应用外壳（第 4 步）：
@@ -118,6 +128,19 @@ fun AppShell(onRecreate: () -> Unit) {
 
     // 切换加载源弹窗
     var sourceOpen by remember { mutableStateOf(false) }
+
+    // 热更补丁加载失败：Python 初始化返回 error 时立刻弹模态弹窗，绝不带半加载状态继续使用
+    var hotfixError by remember { mutableStateOf<String?>(null) }
+    var hotfixFailCount by remember { mutableIntStateOf(0) }
+
+    // 启动公告：静默后台拉取；命中且未「下次更新前不再弹出」时弹一次
+    var notice by remember { mutableStateOf<NoticeData?>(null) }
+    var noticeMute by remember { mutableStateOf(false) }
+
+    /** 删除已下载的热更补丁目录（清除补丁的唯一落点；删除后必须重启）。 */
+    fun clearHotfixDir() {
+        File(Platform.configDir(), "hotfix").deleteRecursively()
+    }
 
     /** 关掉阅读会话：清掉状态并让 Python 释放句柄（缓存随之回收）。 */
     fun closeReader() {
@@ -192,6 +215,25 @@ fun AppShell(onRecreate: () -> Unit) {
     LaunchedEffect(Unit) {
         delay(AUTO_UPDATE_DELAY_MS)
         ApiBridge.sourceRefresh()
+    }
+
+    // 热更补丁加载失败：读 Python 启动结果，error 时立刻弹模态弹窗（只有重试 / 清除补丁）
+    LaunchedEffect(Unit) {
+        val info = ApiBridge.startupInfo()
+        if (info.optString("hotfix_status") == "error") {
+            hotfixError = info.optString("hotfix_error").ifEmpty { "unknown error" }
+            hotfixFailCount = info.optInt("hotfix_fail_count")
+        }
+    }
+
+    // 启动公告：静默后台拉取；命中且未「下次更新前不再弹出」时提示一次
+    LaunchedEffect(Unit) {
+        delay(AUTO_UPDATE_DELAY_MS)
+        val fetched = withContext(Dispatchers.IO) { NoticeCenter.fetch() } ?: return@LaunchedEffect
+        // 静音判定按 epoch 秒比对：相同 → 不弹；不同（含未设置）→ 照常弹
+        if (NoticeCenter.mutedTs(context) != fetched.epochSeconds) {
+            notice = fetched
+        }
     }
 
     // 队列快照刷新：进入下载 / 任务页时先拉一次，之后跟着队列变更刷新。
@@ -489,11 +531,129 @@ fun AppShell(onRecreate: () -> Unit) {
             onPickSource = { name -> updateCenter.selectSource(name) },
             onConfirmSource = { updateCenter.confirmSource() },
             onRetest = { updateCenter.retestSources() },
+            onRestart = { forceRestart() },
         )
 
         // 切换加载源弹窗
         if (sourceOpen) {
             SourceDialog(onClose = { sourceOpen = false })
+        }
+
+        // 热更补丁加载失败：模态弹窗（不允许点外部关闭），只提供「重试」与「清除补丁」，
+        // 两者都强制重启 —— 绝不带着半加载状态继续使用。失败 ≥3 次时把「清除补丁」作为主按钮。
+        hotfixError?.let { message ->
+            val manyFailures = hotfixFailCount >= 3
+            // 「重试」始终是 TextButton；失败 ≥3 次时把「清除补丁」渲染为主按钮（Button）
+            val retryAction: @Composable () -> Unit = {
+                TextButton(onClick = { forceRestart() }) {
+                    Text(stringResource(R.string.btn_retry))
+                }
+            }
+            val clearAction: @Composable () -> Unit = {
+                if (manyFailures) {
+                    Button(onClick = {
+                        clearHotfixDir()
+                        forceRestart()
+                    }) {
+                        Text(stringResource(R.string.btn_clear_hotfix))
+                    }
+                } else {
+                    TextButton(onClick = {
+                        clearHotfixDir()
+                        forceRestart()
+                    }) {
+                        Text(stringResource(R.string.btn_clear_hotfix))
+                    }
+                }
+            }
+            AlertDialog(
+                onDismissRequest = { /* 模态：不响应点击外部 / 返回键 */ },
+                modifier = Modifier.widthIn(max = 360.dp),
+                title = { Text(stringResource(R.string.hotfix_error_title)) },
+                text = {
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.verticalScroll(rememberScrollState()),
+                    ) {
+                        Text(stringResource(R.string.hotfix_error_body, message))
+                        Text(
+                            text = if (hotfixFailCount >= 3) {
+                                stringResource(R.string.hotfix_fail_count, hotfixFailCount)
+                            } else {
+                                stringResource(R.string.hotfix_error_retry_hint)
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                },
+                confirmButton = {
+                    Row(
+                        horizontalArrangement = Arrangement.End,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        if (manyFailures) {
+                            retryAction()
+                            clearAction()
+                        } else {
+                            clearAction()
+                            retryAction()
+                        }
+                    }
+                },
+            )
+        }
+
+        // 启动公告：右下「确定」、左下「下次更新前不再弹出」复选框；link 非空时给「查看详情」
+        notice?.let { data ->
+            val noticeTitle = data.title.ifBlank { stringResource(R.string.notice_default_title) }
+            AlertDialog(
+                onDismissRequest = { notice = null },
+                modifier = Modifier.widthIn(max = 360.dp),
+                title = { Text(noticeTitle, style = MaterialTheme.typography.titleMedium) },
+                text = {
+                    Column(
+                        modifier = Modifier
+                            .heightIn(max = 280.dp)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(data.body)
+                        if (data.link.isNotEmpty()) {
+                            TextButton(onClick = { openUrl(context, data.link) }) {
+                                Text(stringResource(R.string.notice_view_detail))
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    Row(
+                        horizontalArrangement = Arrangement.End,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        TextButton(onClick = {
+                            // 勾选才记忆；不勾选则下次启动照常弹
+                            if (noticeMute) NoticeCenter.mute(context, data.epochSeconds)
+                            notice = null
+                        }) {
+                            Text(stringResource(R.string.btn_confirm))
+                        }
+                    }
+                },
+                dismissButton = {
+                    // 左下复选框：不要 fillMaxWidth，否则会与右对齐的确定按钮抢宽度
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(
+                            checked = noticeMute,
+                            onCheckedChange = { noticeMute = it },
+                        )
+                        Text(
+                            text = stringResource(R.string.notice_mute_before_update),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                },
+            )
         }
     }
 }

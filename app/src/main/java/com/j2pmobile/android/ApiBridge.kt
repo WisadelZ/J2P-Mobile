@@ -296,6 +296,30 @@ object ApiBridge {
         PythonBridge.call("load_config")
     }
 
+    /**
+     * Python 启动结果（等价于 [PythonBridge.ensureReady] 的返回值）。
+     *
+     * 里面带热更补丁的加载状态（`hotfix_status` / `hotfix_error` / `hotfix_fail_count`），
+     * 外壳层据此在加载失败时立刻弹模态弹窗。
+     */
+    suspend fun startupInfo(): JSONObject = withContext(Dispatchers.IO) {
+        PythonBridge.ensureReady()
+    }
+
+    /** 检查并安装热更补丁（清单拉取 / 下载 / 校验 / 安装都在 Python 侧）；失败静默。 */
+    suspend fun hotfixCheck(): JSONObject = withContext(Dispatchers.IO) {
+        PythonBridge.call("hotfix_check")
+    }
+
+    /** 当前资源版本（无补丁时为基线 1），供设置页「关于」展示。 */
+    suspend fun hotfixResVersion(): ApiResult<Int> = withContext(Dispatchers.IO) {
+        val result = PythonBridge.call("hotfix_res_version")
+        if (!result.optBoolean("ok")) {
+            return@withContext ApiResult.Err(result.optString("error").ifEmpty { "unknown error" })
+        }
+        ApiResult.Ok(result.optInt("res_version", 1))
+    }
+
     /** 把局部配置深度合并进 conf.yml。 */
     suspend fun updateConfig(patch: JSONObject): JSONObject = withContext(Dispatchers.IO) {
         PythonBridge.call("update_config", patch.toString())

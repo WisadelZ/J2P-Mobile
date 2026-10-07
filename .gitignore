@@ -1,0 +1,31 @@
+# Gradle / 构建产物
+.gradle/
+build/
+app/build/
+.kotlin/
+.cxx/
+
+# 本机环境（SDK 路径等，因机器而异）
+local.properties
+
+# IDE
+.idea/
+*.iml
+
+# 签名密钥：绝不入库（缺失时构建会回退到 AGP 自动生成的 debug 密钥）
+keystore/
+*.keystore
+*.jks
+*.p12
+
+# Python 编译残留（Chaquopy 构建时自行生成，源码树里不应出现）
+__pycache__/
+*.py[cod]
+
+# 打包产物
+*.apk
+*.aab
+
+# 操作系统
+.DS_Store
+Thumbs.db

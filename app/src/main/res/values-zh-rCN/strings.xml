@@ -23,7 +23,7 @@
 
     <!-- 设置底部：关于（由原帮助页并入） -->
     <string name="about_title">关于</string>
-    <string name="about_version_value">v2.4.4</string>
+    <string name="about_version_value">v2.4.4-fix.1</string>
     <string name="about_author_value">WisadelZ</string>
     <string name="about_project_value">https://github.com/WisadelZ/J2P-Mobile</string>
     <string name="about_issues_value">https://github.com/WisadelZ/J2P-Mobile/issues</string>
@@ -456,4 +456,22 @@
     <string name="source_switched">已切换到节点 %1$d</string>
     <string name="source_empty">当前没有可用的加载源，请稍后重试</string>
     <string name="btn_exit">退出</string>
+
+    <!-- 热更补丁 / 资源版本 / 启动公告（v2.4.4-fix.1） -->
+    <string name="about_res_version">资源版本</string>
+    <string name="about_res_version_value">1</string>
+    <string name="hotfix_error_title">热更补丁加载失败</string>
+    <string name="hotfix_error_body">热更补丁加载失败：%1$s</string>
+    <string name="hotfix_error_retry_hint">可以重试，或清除补丁后重启。</string>
+    <string name="hotfix_fail_count">已失败 %1$d 次，建议清除补丁。</string>
+    <string name="btn_clear_hotfix">清除补丁</string>
+    <string name="btn_restart_now">立即重启</string>
+    <string name="btn_later">稍后</string>
+    <string name="hotfix_ready_title">热更补丁已就绪</string>
+    <string name="hotfix_ready_body">资源版本 %1$d 已就绪，重启后生效。</string>
+    <string name="clear_hotfix_confirm_title">清除补丁</string>
+    <string name="clear_hotfix_confirm_body">将删除已下载的热更补丁并重启应用，确定吗？</string>
+    <string name="notice_default_title">公告</string>
+    <string name="notice_view_detail">查看详情</string>
+    <string name="notice_mute_before_update">下次更新前不再弹出</string>
 </resources>

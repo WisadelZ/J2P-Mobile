@@ -17,6 +17,7 @@
 package com.j2pmobile.android
 
 import android.content.Context
+import android.content.Intent
 import androidx.core.content.FileProvider
 import java.io.File
 
@@ -67,4 +68,21 @@ object Platform {
     @JvmStatic
     fun uriFor(path: String): String =
         FileProvider.getUriForFile(ctx(), authority(), File(path)).toString()
+}
+
+/**
+ * 强制重启应用：清空任务栈后重新拉起 [MainActivity]，再结束当前进程。
+ *
+ * 用于「热更补丁加载失败」的重试 / 清除补丁，以及设置页「清除补丁」——必须整进程重启，
+ * 才能保证补丁要么完整生效、要么完全不生效，绝不带着半加载状态继续使用。
+ *
+ * **必须在主线程调用**（[android.app.Activity.startActivity] 的约束）。
+ */
+fun forceRestart() {
+    val context = Platform.ctx()
+    val intent = Intent(context, MainActivity::class.java).apply {
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+    }
+    context.startActivity(intent)
+    kotlin.system.exitProcess(0)
 }

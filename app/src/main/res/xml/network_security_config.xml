@@ -1,13 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    网络安全配置：默认仍强制 HTTPS，只对更新清单所在的私有域名放行明文 HTTP。
+    网络安全配置：全项目已统一走 HTTPS（更新清单 / 补丁清单 / 公告均为 https://getproxy.wisadelz.cn/...），
+    因此不再对任何域名放行明文 HTTP —— 显式声明 base-config 关闭明文流量，其余保持系统默认的强制 HTTPS。
 
-    原因：更新清单固定走 http://getproxy.wisadelz.cn/update.json（见 Updater.MANIFEST_URL），
-    而 Android 9（API 28）起默认禁止明文流量；这里按域名精确放行，
-    不整体打开 usesCleartextTraffic，其它域名继续强制 HTTPS。
+    历史：Android 9（API 28）起默认禁止明文流量，此前本文件只为更新清单所在的私有域名放行过明文；
+    清单改走 HTTPS 后，放行规则一并移除。
 -->
 <network-security-config>
-    <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="true">getproxy.wisadelz.cn</domain>
-    </domain-config>
+    <base-config cleartextTrafficPermitted="false" />
 </network-security-config>
