@@ -33,6 +33,7 @@ import base64
 import hashlib
 import json
 import os
+import threading
 import uuid
 
 from Crypto.Cipher import AES
@@ -60,6 +61,10 @@ _KEY_SIZE = 32
 # 运行时凭据：只在内存里，供下载层登录使用
 _credentials = {"username": "", "password": ""}
 
+# 首装标识（device.id）只允许一个线程去创建：并发创建会各写各的随机值，
+# 后写的那次替换掉前一次，两次派生出不同密钥 —— 先写下去的数据就再也解不开了。
+_INSTALL_ID_LOCK = threading.Lock()
+
 
 def account_path():
     """账号文件路径：config/ 目录下（与 conf.yml 同级）。"""
@@ -72,23 +77,24 @@ def install_id_path():
 
 def _machine_factor():
     """本机标识：让加密文件绑定本机，换机器或换安装后无法解密。"""
-    path = install_id_path()
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            value = f.read().strip()
-        if value:
-            return hashlib.sha256(value.encode("utf-8")).digest()
-    except OSError:
-        pass
-    value = uuid.uuid4().hex
-    tmp = path + ".tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(value)
-        os.replace(tmp, path)
-    except OSError:
-        pass
-    return hashlib.sha256(value.encode("utf-8")).digest()
+    with _INSTALL_ID_LOCK:
+        path = install_id_path()
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                value = f.read().strip()
+            if value:
+                return hashlib.sha256(value.encode("utf-8")).digest()
+        except OSError:
+            pass
+        value = uuid.uuid4().hex
+        tmp = path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(value)
+            os.replace(tmp, path)
+        except OSError:
+            pass
+        return hashlib.sha256(value.encode("utf-8")).digest()
 
 
 def _derive_key(salt):
@@ -115,41 +121,87 @@ def _decrypt(raw):
     return json.loads(cipher.decrypt_and_verify(raw[offset + _TAG_SIZE:], tag).decode("utf-8"))
 
 
-def _seal(records):
-    """把账号列表加密成落盘字节。
+def seal_payload(payload):
+    """把任意可 JSON 序列化的对象加密成落盘字节。
 
     安卓端优先用 **Android Keystore 的硬件密钥**加密（V2 格式）：密钥在系统密钥库内生成、
     不可导出，也不依赖任何写在源码里的常量；桌面端或 Keystore 不可用时，退回下面的
     内置密钥派生方案（V1 格式）。
+
+    账号文件（account.dat）与本地收藏文件（collection.dat）共用这一套加解密，
+    便于 :mod:`core.collection` 复用同一份实现。
     """
     from core import platform_bridge
     plain = base64.b64encode(
-        json.dumps(records, ensure_ascii=False).encode("utf-8")).decode("ascii")
+        json.dumps(payload, ensure_ascii=False).encode("utf-8")).decode("ascii")
     token = platform_bridge.keystore_encrypt(plain)
     if token:
         return _MAGIC_V2 + token.encode("ascii")
-    return _encrypt(records)
+    return _encrypt(payload)
 
 
-def _read_payload():
-    """读取并解密账号列表；文件不存在、损坏或解不开（换机/换安装）时返回 []。"""
-    try:
-        with open(account_path(), "rb") as f:
-            raw = f.read()
-    except OSError:
-        return []
+def open_payload(raw):
+    """还原 :func:`seal_payload` 的产物；文件头不符或解不开时返回 None。"""
     try:
         if raw.startswith(_MAGIC_V2):
             from core import platform_bridge
             plain = platform_bridge.keystore_decrypt(raw[len(_MAGIC_V2):].decode("ascii"))
             if not plain:
-                return []
-            data = json.loads(base64.b64decode(plain).decode("utf-8"))
-        elif raw.startswith(_MAGIC):
-            data = _decrypt(raw)
-        else:
-            return []
+                return None
+            return json.loads(base64.b64decode(plain).decode("utf-8"))
+        if raw.startswith(_MAGIC):
+            return _decrypt(raw)
     except Exception:
+        return None
+    return None
+
+
+def read_secure(path):
+    """读取并解密一个加密文件；不存在 / 损坏 / 换机换安装时返回 None。"""
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except OSError:
+        return None
+    return open_payload(raw)
+
+
+def write_secure(path, payload):
+    """把对象加密后原子写入文件（先写临时文件再替换，避免半截文件）。
+
+    临时文件名**带上线程号**：界面可能同时发起多个「先读、发现没有文件、再写」的调用
+    （账号页的两个预览就是并发的），若共用同一个 ``path + ".tmp"``，先完成的那次把
+    临时文件替换走后，后一次再去替换就会找不到文件而报
+    ``FileNotFoundError: No such file or directory``。带上线程号后各写各的，互不影响。
+    """
+    directory = os.path.dirname(path)
+    if directory:
+        try:
+            os.makedirs(directory, exist_ok=True)
+        except OSError:
+            pass
+    tmp = "%s.%d.%d.tmp" % (path, os.getpid(), threading.get_ident())
+    try:
+        with open(tmp, "wb") as f:
+            f.write(seal_payload(payload))
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _seal(records):
+    """把账号列表加密成落盘字节。"""
+    return seal_payload(records)
+
+
+def _read_payload():
+    """读取并解密账号列表；文件不存在、损坏或解不开（换机/换安装）时返回 []。"""
+    data = read_secure(account_path())
+    if data is None:
         return []
     # 旧版本只存单个账号（dict）：迁移成列表，并把它标记为当前账号
     if isinstance(data, dict):
@@ -169,11 +221,7 @@ def _write_payload(records):
     if not records:
         _remove_file()
         return
-    path = account_path()
-    tmp = path + ".tmp"
-    with open(tmp, "wb") as f:
-        f.write(_seal(records))
-    os.replace(tmp, path)
+    write_secure(account_path(), records)
 
 
 def _remove_file():

@@ -350,7 +350,7 @@ private fun TaskToolbar(queue: QueueState) {
         Box {
             ToolBox(onClick = { sortExpanded = true }) {
                 Text(
-                    text = stringResource(sortLabelRes(queue.sortKey)),
+                    text = stringResource(taskSortLabelRes(queue.sortKey)),
                     style = MaterialTheme.typography.labelMedium,
                     maxLines = 1,
                 )
@@ -363,7 +363,7 @@ private fun TaskToolbar(queue: QueueState) {
             DropdownMenu(expanded = sortExpanded, onDismissRequest = { sortExpanded = false }) {
                 TaskStatus.sortKeys.forEach { key ->
                     DropdownMenuItem(
-                        text = { Text(stringResource(sortLabelRes(key))) },
+                        text = { Text(stringResource(taskSortLabelRes(key))) },
                         trailingIcon = {
                             if (key == queue.sortKey) {
                                 Icon(
@@ -682,7 +682,7 @@ private fun statusLabelRes(status: String): Int = when (status) {
     else -> R.string.task_status_waiting
 }
 
-private fun sortLabelRes(key: String): Int = when (key) {
+private fun taskSortLabelRes(key: String): Int = when (key) {
     "id" -> R.string.task_sort_id
     "name" -> R.string.task_sort_name
     "progress" -> R.string.task_sort_progress

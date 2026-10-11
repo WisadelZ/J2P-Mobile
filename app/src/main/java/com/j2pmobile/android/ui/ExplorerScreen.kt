@@ -97,7 +97,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 /** 搜索方式与排序字段（与 `core/library.py` 的常量一致）。 */
-private val SEARCH_MODES = listOf("all", "name", "author", "tag", "id")
+private val EXPLORER_MODES = listOf("all", "name", "author", "tag", "id")
 private val SORT_KEYS = listOf("name", "time", "size", "pages")
 private const val DEFAULT_MODE = "all"
 private const val DEFAULT_SORT = "name"
@@ -701,7 +701,7 @@ private fun ModeMenu(state: ExplorerState, onPick: (String) -> Unit) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                text = stringResource(modeLabelRes(state.mode)),
+                text = stringResource(explorerModeLabelRes(state.mode)),
                 style = MaterialTheme.typography.bodySmall,
                 maxLines = 1,
             )
@@ -712,9 +712,9 @@ private fun ModeMenu(state: ExplorerState, onPick: (String) -> Unit) {
             )
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            SEARCH_MODES.forEach { key ->
+            EXPLORER_MODES.forEach { key ->
                 DropdownMenuItem(
-                    text = { Text(stringResource(modeLabelRes(key))) },
+                    text = { Text(stringResource(explorerModeLabelRes(key))) },
                     onClick = {
                         expanded = false
                         onPick(key)
@@ -737,7 +737,7 @@ private fun ExplorerToolbar(state: ExplorerState, onReload: () -> Unit) {
         Box {
             ToolBox(onClick = { expanded = true }) {
                 Text(
-                    text = stringResource(sortLabelRes(state.sortKey)),
+                    text = stringResource(explorerSortLabelRes(state.sortKey)),
                     style = MaterialTheme.typography.labelMedium,
                     maxLines = 1,
                 )
@@ -750,7 +750,7 @@ private fun ExplorerToolbar(state: ExplorerState, onReload: () -> Unit) {
             DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
                 SORT_KEYS.forEach { key ->
                     DropdownMenuItem(
-                        text = { Text(stringResource(sortLabelRes(key))) },
+                        text = { Text(stringResource(explorerSortLabelRes(key))) },
                         trailingIcon = {
                             if (key == state.sortKey) {
                                 Icon(
@@ -1150,7 +1150,7 @@ private fun MetaRow(label: String, value: String) {
     }
 }
 
-private fun modeLabelRes(key: String): Int = when (key) {
+private fun explorerModeLabelRes(key: String): Int = when (key) {
     "name" -> R.string.explorer_mode_name
     "author" -> R.string.explorer_mode_author
     "tag" -> R.string.explorer_mode_tag
@@ -1158,7 +1158,7 @@ private fun modeLabelRes(key: String): Int = when (key) {
     else -> R.string.explorer_mode_all
 }
 
-private fun sortLabelRes(key: String): Int = when (key) {
+private fun explorerSortLabelRes(key: String): Int = when (key) {
     "time" -> R.string.explorer_sort_time
     "size" -> R.string.explorer_sort_size
     "pages" -> R.string.explorer_sort_pages

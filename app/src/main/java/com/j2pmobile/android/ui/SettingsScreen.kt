@@ -93,6 +93,8 @@ fun SettingsScreen(
     isDownloadActive: () -> Boolean,
     /** 点「检查更新」：把当前更新通道交给外壳层的更新中心。 */
     onCheckUpdate: (String) -> Unit,
+    /** 导入本地收藏数据成功后调一次：让账号页的 tag 收藏 / 浏览历史预览作废重取。 */
+    onLocalDataImported: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -110,6 +112,9 @@ fun SettingsScreen(
     var statusKind by remember { mutableStateOf(StatusKind.IDLE) }
     /** 导出时暂存 YAML 文本，等用户选完目标文件再写。 */
     var pendingExport by remember { mutableStateOf<String?>(null) }
+
+    /** 导出本地收藏数据（tag 收藏 + 收藏夹 + 浏览历史）时暂存的 JSON 文本。 */
+    var pendingLocalExport by remember { mutableStateOf<String?>(null) }
 
     /** 「清除补丁」确认框是否打开。 */
     var clearHotfixOpen by remember { mutableStateOf(false) }
@@ -203,6 +208,49 @@ fun SettingsScreen(
         }
     }
 
+    // ---- SAF：导出 / 导入本地收藏数据（tag 收藏 + 收藏夹 + 浏览历史，JSON） ----
+    val localExportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        val text = pendingLocalExport
+        pendingLocalExport = null
+        if (uri == null) {
+            setStatus(R.string.status_local_export_canceled, StatusKind.IDLE)
+            return@rememberLauncherForActivityResult
+        }
+        if (text == null || writeText(context, uri, text)) {
+            setStatus(R.string.status_local_exported, StatusKind.OK, uri.lastPathSegment ?: "")
+        } else {
+            setStatus(R.string.status_local_export_failed, StatusKind.ERR, uri.toString())
+        }
+    }
+
+    val localImportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri == null) {
+            setStatus(R.string.status_local_import_canceled, StatusKind.IDLE)
+            return@rememberLauncherForActivityResult
+        }
+        val text = readText(context, uri)
+        if (text == null) {
+            setStatus(R.string.status_local_import_failed, StatusKind.ERR, uri.toString())
+            return@rememberLauncherForActivityResult
+        }
+        scope.launch {
+            when (val result = ApiBridge.localDataImportText(text)) {
+                is ApiResult.Ok -> {
+                    setStatus(R.string.status_local_imported, StatusKind.OK)
+                    // 账号页的 tag 收藏 / 浏览历史预览要跟着换新
+                    onLocalDataImported()
+                }
+
+                is ApiResult.Err ->
+                    setStatus(R.string.status_local_import_failed, StatusKind.ERR, result.message)
+            }
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -251,6 +299,52 @@ fun SettingsScreen(
                 modifier = Modifier.weight(1f),
             ) {
                 Text(stringResource(R.string.btn_import_conf), maxLines = 1)
+            }
+        }
+
+        // ---------------- 本地收藏数据（tag 收藏 + 收藏夹 + 浏览历史） ----------------
+        SectionTitle(stringResource(R.string.section_local_data))
+        Text(
+            text = stringResource(R.string.desc_local_data),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(
+                onClick = {
+                    scope.launch {
+                        when (val result = ApiBridge.localDataExportText()) {
+                            is ApiResult.Ok -> {
+                                pendingLocalExport = result.value
+                                localExportLauncher.launch("collection.json")
+                            }
+
+                            is ApiResult.Err -> setStatus(
+                                R.string.status_local_export_failed,
+                                StatusKind.ERR,
+                                result.message,
+                            )
+                        }
+                    }
+                },
+                modifier = Modifier.weight(1f),
+            ) {
+                Text(stringResource(R.string.btn_export_local), maxLines = 1)
+            }
+            OutlinedButton(
+                onClick = {
+                    // 任务进行中导入会与界面看到的进度打架，与导入配置一样先挡住
+                    if (isDownloadActive()) {
+                        setStatus(R.string.status_busy_restart, StatusKind.ERR)
+                        return@OutlinedButton
+                    }
+                    localImportLauncher.launch(
+                        arrayOf("application/json", "text/*", "application/octet-stream")
+                    )
+                },
+                modifier = Modifier.weight(1f),
+            ) {
+                Text(stringResource(R.string.btn_import_local), maxLines = 1)
             }
         }
 

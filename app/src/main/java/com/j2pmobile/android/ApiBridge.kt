@@ -130,8 +130,18 @@ data class AlbumDetail(
     val title: String,
     val author: String,
     val tags: String,
+    /** 结构化标签（详情页渲染成可点击圆角标签，跳转「标签」检索）。 */
+    val tagList: List<String>,
+    /** 结构化作者（详情页渲染成可点击圆角标签，跳转「作者」检索）。 */
+    val authorList: List<String>,
+    /** 结构化角色 / 登场人物（详情页渲染成可点击圆角标签，跳转「角色」检索）。 */
+    val actorList: List<String>,
     val likes: String,
     val views: String,
+    /** 当前账号是否已点赞（服务端状态）。 */
+    val liked: Boolean,
+    /** 评论总数（仅展示，不保证与实际一致）。 */
+    val commentCount: Int,
     val pages: Int,
     val chapters: Int,
     val favorited: Boolean,
@@ -197,6 +207,59 @@ data class FavoritePageData(
     val page: Int,
     val pageSize: Int,
 )
+
+/** 本地 tag 收藏夹（`isDefault` 为真时名字用界面本地化的「默认收藏夹」）。 */
+data class TagFolder(val id: String, val name: String, val isDefault: Boolean)
+
+/** 一条本地 tag 收藏。 */
+data class TagItem(val name: String, val folderId: String, val folderName: String)
+
+/** tag 收藏完整页一页：条目 + 全部收藏夹 + 总数。 */
+data class TagPageData(
+    val items: List<TagItem>,
+    val folders: List<TagFolder>,
+    val total: Int,
+    val page: Int,
+    val pageSize: Int,
+)
+
+/** 浏览历史一页：条目 + 总数。 */
+data class HistoryPageData(
+    val items: List<AlbumItem>,
+    val total: Int,
+    val page: Int,
+    val pageSize: Int,
+)
+
+/** 一条网站评论（`replies` 为对其的直接回复）。 */
+data class CommentItem(
+    val id: String,
+    val user: String,
+    val content: String,
+    val spoiler: Boolean,
+    val likes: Int,
+    val created: String,
+    val replies: List<CommentItem>,
+)
+
+/** 评论一页。 */
+data class CommentPageData(
+    val items: List<CommentItem>,
+    val total: Int,
+    val commentCount: Int,
+    val page: Int,
+)
+
+/** 点赞结果：`liked` 为服务端最终状态（Toggle 后重新拉取详情得到）。 */
+data class LikeResult(
+    val liked: Boolean,
+    val likes: String,
+    val accepted: Boolean,
+    val msg: String,
+)
+
+/** 发表评论结果：`success` 为假时 `msg` 是服务端原文提示。 */
+data class PostCommentResult(val success: Boolean, val msg: String)
 
 /** 资源管理器的一条扫描结果：同一本漫画的 PDF 与图片文件夹归为一项。 */
 data class LibraryEntry(
@@ -425,8 +488,13 @@ object ApiBridge {
                 title = result.optString("title"),
                 author = result.optString("author"),
                 tags = result.optString("tags"),
+                tagList = result.optJSONArray("tag_list").toStringList(),
+                authorList = result.optJSONArray("author_list").toStringList(),
+                actorList = result.optJSONArray("actor_list").toStringList(),
                 likes = result.optString("likes"),
                 views = result.optString("views"),
+                liked = result.optBoolean("liked"),
+                commentCount = result.optInt("comment_count"),
                 pages = result.optInt("pages"),
                 chapters = result.optInt("chapters"),
                 favorited = result.optBoolean("favorited"),
@@ -1008,14 +1076,15 @@ object ApiBridge {
 
     // ---------------------------------------------------------------- 收藏
 
-    /** 账号页收藏预览：「全部」收藏夹最前面的若干本。 */
-    suspend fun favoritePreview(): ApiResult<List<AlbumItem>> = withContext(Dispatchers.IO) {
-        val result = PythonBridge.call("favorite_preview")
-        if (!result.optBoolean("ok")) {
-            return@withContext ApiResult.Err(result.optString("error").ifEmpty { "unknown error" })
+    /** 账号页收藏预览：「全部」收藏夹最前面的若干本（`limit<=0` 用 Python 侧默认值）。 */
+    suspend fun favoritePreview(limit: Int = 0): ApiResult<List<AlbumItem>> =
+        withContext(Dispatchers.IO) {
+            val result = PythonBridge.call("favorite_preview", limit)
+            if (!result.optBoolean("ok")) {
+                return@withContext ApiResult.Err(result.optString("error").ifEmpty { "unknown error" })
+            }
+            ApiResult.Ok(result.optJSONArray("items").toAlbumItems())
         }
-        ApiResult.Ok(result.optJSONArray("items").toAlbumItems())
-    }
 
     /** 收藏列表页一页（含该账号的全部收藏夹与总数）。 */
     suspend fun favoritePage(page: Int, folderId: String): ApiResult<FavoritePageData> =
@@ -1042,6 +1111,210 @@ object ApiBridge {
                 )
             )
         }
+
+    // ---------------------------------------------------------------- 榜单
+
+    /** 日 / 周 / 月榜一页（`kind` = day / week / month），与检索同构。 */
+    suspend fun ranking(kind: String, uiPage: Int): ApiResult<ExplorePageData> =
+        withContext(Dispatchers.IO) {
+            val result = PythonBridge.call("ranking", kind, uiPage)
+            if (!result.optBoolean("ok")) {
+                return@withContext ApiResult.Err(result.optString("error").ifEmpty { "unknown error" })
+            }
+            ApiResult.Ok(
+                ExplorePageData(
+                    items = result.optJSONArray("items").toAlbumItems(),
+                    total = result.optInt("total"),
+                    uiPage = result.optInt("ui_page", uiPage),
+                )
+            )
+        }
+
+    // ------------------------------------------------------- 点赞 / 评论
+
+    /** 点赞 / 取消点赞（Toggle）；返回服务端最终状态。 */
+    suspend fun albumLike(albumId: String): ApiResult<LikeResult> = withContext(Dispatchers.IO) {
+        val result = PythonBridge.call("album_like", albumId)
+        if (!result.optBoolean("ok")) {
+            return@withContext ApiResult.Err(result.optString("error").ifEmpty { "unknown error" })
+        }
+        ApiResult.Ok(
+            LikeResult(
+                liked = result.optBoolean("liked"),
+                likes = result.optString("likes"),
+                accepted = result.optBoolean("accepted"),
+                msg = result.optString("msg"),
+            )
+        )
+    }
+
+    /** 本子评论一页（只读）。 */
+    suspend fun albumComments(albumId: String, page: Int): ApiResult<CommentPageData> =
+        withContext(Dispatchers.IO) {
+            val result = PythonBridge.call("album_comments", albumId, page)
+            if (!result.optBoolean("ok")) {
+                return@withContext ApiResult.Err(result.optString("error").ifEmpty { "unknown error" })
+            }
+            ApiResult.Ok(
+                CommentPageData(
+                    items = result.optJSONArray("items").toComments(),
+                    total = result.optInt("total"),
+                    commentCount = result.optInt("comment_count"),
+                    page = result.optInt("page", page),
+                )
+            )
+        }
+
+    /** 发表评论（需登录）；失败时 `msg` 为服务端原文提示。 */
+    suspend fun albumCommentPost(
+        albumId: String,
+        content: String,
+        spoiler: Boolean = false,
+    ): ApiResult<PostCommentResult> = withContext(Dispatchers.IO) {
+        val result = PythonBridge.call("album_comment_post", albumId, content, spoiler)
+        if (!result.optBoolean("ok")) {
+            return@withContext ApiResult.Err(result.optString("error").ifEmpty { "unknown error" })
+        }
+        ApiResult.Ok(
+            PostCommentResult(
+                success = result.optBoolean("success"),
+                msg = result.optString("msg"),
+            )
+        )
+    }
+
+    // ------------------------------------------------- tag 收藏（本地存储）
+
+    /** 本地 tag 收藏夹列表（不含「全部」，那一项由界面补）。 */
+    suspend fun tagFolders(): ApiResult<List<TagFolder>> = withContext(Dispatchers.IO) {
+        val result = PythonBridge.call("tag_folders")
+        if (!result.optBoolean("ok")) {
+            return@withContext ApiResult.Err(result.optString("error").ifEmpty { "unknown error" })
+        }
+        ApiResult.Ok(result.optJSONArray("folders").toTagFolders())
+    }
+
+    /** 新建本地 tag 收藏夹（同名复用），返回它。 */
+    suspend fun tagFolderCreate(name: String): ApiResult<TagFolder> = withContext(Dispatchers.IO) {
+        val result = PythonBridge.call("tag_folder_create", name)
+        if (!result.optBoolean("ok")) {
+            return@withContext ApiResult.Err(result.optString("error").ifEmpty { "unknown error" })
+        }
+        ApiResult.Ok(result.optJSONObject("folder").toTagFolder())
+    }
+
+    /** 账号页 tag 收藏预览（`limit<=0` 用 Python 侧默认值）。 */
+    suspend fun tagPreview(limit: Int = 0): ApiResult<List<TagItem>> = withContext(Dispatchers.IO) {
+        val result = PythonBridge.call("tag_preview", limit)
+        if (!result.optBoolean("ok")) {
+            return@withContext ApiResult.Err(result.optString("error").ifEmpty { "unknown error" })
+        }
+        ApiResult.Ok(result.optJSONArray("items").toTagItems())
+    }
+
+    /** 收藏一个 tag（可指定收藏夹）。 */
+    suspend fun tagAdd(name: String, folderId: String): ApiResult<Unit> = withContext(Dispatchers.IO) {
+        val result = PythonBridge.call("tag_add", name, folderId)
+        if (!result.optBoolean("ok")) {
+            return@withContext ApiResult.Err(result.optString("error").ifEmpty { "unknown error" })
+        }
+        ApiResult.Ok(Unit)
+    }
+
+    /** 取消收藏一个 tag。 */
+    suspend fun tagRemove(name: String): ApiResult<Unit> = withContext(Dispatchers.IO) {
+        val result = PythonBridge.call("tag_remove", name)
+        if (!result.optBoolean("ok")) {
+            return@withContext ApiResult.Err(result.optString("error").ifEmpty { "unknown error" })
+        }
+        ApiResult.Ok(Unit)
+    }
+
+    /** 把一个 tag 移到指定收藏夹。 */
+    suspend fun tagMove(name: String, folderId: String): ApiResult<Unit> = withContext(Dispatchers.IO) {
+        val result = PythonBridge.call("tag_move", name, folderId)
+        if (!result.optBoolean("ok")) {
+            return@withContext ApiResult.Err(result.optString("error").ifEmpty { "unknown error" })
+        }
+        ApiResult.Ok(Unit)
+    }
+
+    /** tag 收藏完整页一页（可按收藏夹过滤）。 */
+    suspend fun tagPage(page: Int, folderId: String): ApiResult<TagPageData> =
+        withContext(Dispatchers.IO) {
+            val result = PythonBridge.call("tag_page", page, folderId)
+            if (!result.optBoolean("ok")) {
+                return@withContext ApiResult.Err(result.optString("error").ifEmpty { "unknown error" })
+            }
+            ApiResult.Ok(
+                TagPageData(
+                    items = result.optJSONArray("items").toTagItems(),
+                    folders = result.optJSONArray("folders").toTagFolders(),
+                    total = result.optInt("total"),
+                    page = result.optInt("page", page),
+                    pageSize = result.optInt("page_size", 10),
+                )
+            )
+        }
+
+    // ------------------------------------------------- 浏览历史（本地存储）
+
+    /** 记录一次本子浏览（详情页加载成功时调用）。 */
+    suspend fun historyAdd(albumId: String, name: String = "", author: String = ""): ApiResult<Unit> =
+        withContext(Dispatchers.IO) {
+            val result = PythonBridge.call("history_add", albumId, name, author)
+            if (!result.optBoolean("ok")) {
+                return@withContext ApiResult.Err(result.optString("error").ifEmpty { "unknown error" })
+            }
+            ApiResult.Ok(Unit)
+        }
+
+    /** 账号页浏览历史预览（`limit<=0` 用 Python 侧默认值）。 */
+    suspend fun historyPreview(limit: Int = 0): ApiResult<List<AlbumItem>> =
+        withContext(Dispatchers.IO) {
+            val result = PythonBridge.call("history_preview", limit)
+            if (!result.optBoolean("ok")) {
+                return@withContext ApiResult.Err(result.optString("error").ifEmpty { "unknown error" })
+            }
+            ApiResult.Ok(result.optJSONArray("items").toAlbumItems())
+        }
+
+    /** 浏览历史完整页一页（支持按关键词搜索）。 */
+    suspend fun historyPage(page: Int, keyword: String): ApiResult<HistoryPageData> =
+        withContext(Dispatchers.IO) {
+            val result = PythonBridge.call("history_page", page, keyword)
+            if (!result.optBoolean("ok")) {
+                return@withContext ApiResult.Err(result.optString("error").ifEmpty { "unknown error" })
+            }
+            ApiResult.Ok(
+                HistoryPageData(
+                    items = result.optJSONArray("items").toAlbumItems(),
+                    total = result.optInt("total"),
+                    page = result.optInt("page", page),
+                    pageSize = result.optInt("page_size", 18),
+                )
+            )
+        }
+
+    // ------------------------------------------- 本地收藏数据导出 / 导入
+
+    /** 把本地收藏（tag 收藏 + 收藏夹 + 浏览历史）导出成 JSON 文本。 */
+    suspend fun localDataExportText(): ApiResult<String> = withContext(Dispatchers.IO) {
+        val result = PythonBridge.call("local_data_export_text")
+        if (!result.optBoolean("ok")) {
+            return@withContext ApiResult.Err(result.optString("error").ifEmpty { "unknown error" })
+        }
+        ApiResult.Ok(result.optString("text"))
+    }
+
+    /** 从 JSON 文本导入本地收藏（整体覆盖现有内容）。 */
+    suspend fun localDataImportText(text: String): ApiResult<Unit> = withContext(Dispatchers.IO) {
+        val result = PythonBridge.call("local_data_import_text", text)
+        if (!result.optBoolean("ok")) {
+            return@withContext ApiResult.Err(result.optString("error").ifEmpty { "unknown error" })
+        }
+        ApiResult.Ok(Unit)
+    }
 }
 
 private fun JSONObject.toReaderSource(): ReaderSource = ReaderSource(
@@ -1089,11 +1362,16 @@ private fun JSONObject.optDoubleOrNull(key: String): Double? =
 private fun JSONArray?.toAlbumItems(): List<AlbumItem> {
     if (this == null) return emptyList()
     val out = ArrayList<AlbumItem>(length())
+    // 界面网格按 id 作 key，重复或空 id 会让 Compose 直接抛异常闪退；
+    // Python 侧已按 id 去重，这里再兜一层，任何来源的列表都不会把界面带崩。
+    val seen = HashSet<String>()
     for (index in 0 until length()) {
         val row = optJSONObject(index) ?: continue
+        val id = row.optString("id")
+        if (id.isEmpty() || !seen.add(id)) continue
         out.add(
             AlbumItem(
-                id = row.optString("id"),
+                id = id,
                 name = row.optString("name"),
                 author = row.optString("author"),
                 coverUrl = row.optString("cover_url"),
@@ -1107,6 +1385,55 @@ private fun JSONArray?.toStringList(): List<String> {
     if (this == null) return emptyList()
     val out = ArrayList<String>(length())
     for (index in 0 until length()) out.add(optString(index))
+    return out
+}
+
+private fun JSONObject?.toTagFolder(): TagFolder = TagFolder(
+    id = this?.optString("id") ?: "",
+    name = this?.optString("name") ?: "",
+    isDefault = this?.optBoolean("default") ?: false,
+)
+
+private fun JSONArray?.toTagFolders(): List<TagFolder> {
+    if (this == null) return emptyList()
+    val out = ArrayList<TagFolder>(length())
+    for (index in 0 until length()) out.add(optJSONObject(index).toTagFolder())
+    return out
+}
+
+private fun JSONArray?.toTagItems(): List<TagItem> {
+    if (this == null) return emptyList()
+    val out = ArrayList<TagItem>(length())
+    for (index in 0 until length()) {
+        val row = optJSONObject(index) ?: continue
+        out.add(
+            TagItem(
+                name = row.optString("name"),
+                folderId = row.optString("folder_id"),
+                folderName = row.optString("folder_name"),
+            )
+        )
+    }
+    return out
+}
+
+private fun JSONArray?.toComments(): List<CommentItem> {
+    if (this == null) return emptyList()
+    val out = ArrayList<CommentItem>(length())
+    for (index in 0 until length()) {
+        val row = optJSONObject(index) ?: continue
+        out.add(
+            CommentItem(
+                id = row.optString("id"),
+                user = row.optString("user"),
+                content = row.optString("content"),
+                spoiler = row.optBoolean("spoiler"),
+                likes = row.optInt("likes"),
+                created = row.optString("created"),
+                replies = row.optJSONArray("replies").toComments(),
+            )
+        )
+    }
     return out
 }
 

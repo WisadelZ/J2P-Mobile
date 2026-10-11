@@ -231,9 +231,10 @@ def update_config(partial_json):
 
 _search_client = None
 _search_epoch = -1              # 建上面这个客户端时的加载源代次（切源后重建）
-_search_cache = {}              # (mode, keyword, sort, time, lib_page) -> (items, total)
+_search_cache = {}              # (key, lib_page) -> (items, total)：检索库页缓存
+_ranking_cache = {}             # (key, lib_page) -> (items, total)：榜单库页缓存
 _SEARCH_CACHE_MAX = 2           # 与桌面版一致：只留最近两个库页
-_SEARCH_PER_UI_PAGE = 20        # 界面每页条数（库每页 80 条）
+_SEARCH_PER_UI_PAGE = 18        # 界面每页条数（库每页 80 条，非整除，需跨库页拼接）
 
 
 def _search_client_instance():
@@ -252,8 +253,62 @@ def _search_client_instance():
     return _search_client
 
 
+def _cached_lib_page(cache, key, lib_page, loader, max_size=_SEARCH_CACHE_MAX):
+    """按 (key, 库页号) 缓存一页 80 条；超出上限时丢最早的（先进先出）。"""
+    entry = cache.get((key, lib_page))
+    if entry is None:
+        entry = loader(lib_page)
+        cache[(key, lib_page)] = entry
+        while len(cache) > max_size:
+            cache.pop(next(iter(cache)))
+    return entry
+
+
+def _ui_window(cache, key, ui_page, loader):
+    """把「库每页 80 条」切成界面第 ui_page 页（每页 18 条）。
+
+    80 不是 18 的整数倍，窗口可能跨两个库页，因此按全局偏移取、必要时拼接下一库页。
+
+    **必须去重**：结果很少的检索（例如某个角色全站只有 1 本）在越界库页上，
+    站点会把同一本又返回一次；若原样拼进窗口，界面就会拿到两条 id 相同的条目，
+    而网格按 id 作 key —— 重复 key 会让 Compose 直接抛异常闪退。
+    这里按 id 去重，并在某页没有新条目时立即停止，避免无谓请求与死循环。
+    """
+    from core import explore as explore_mod
+    per = _SEARCH_PER_UI_PAGE
+    lib_page_size = explore_mod.LIB_PAGE_SIZE
+    global_start = (ui_page - 1) * per
+    lib_page = global_start // lib_page_size + 1
+    offset = global_start % lib_page_size
+
+    window = []
+    seen = set()
+    probe = lib_page
+    total = 0
+    while len(window) < offset + per:
+        items, total = _cached_lib_page(cache, key, probe, loader)
+        fresh = []
+        for item in items:
+            album_id = str(item.get("id") or "")
+            if album_id in seen:
+                continue
+            seen.add(album_id)
+            fresh.append(item)
+        if not fresh:
+            break
+        window.extend(fresh)
+        probe += 1
+    return window[offset:offset + per], total
+
+
+def _search_lib_page(explore_mod, mode, keyword, sort, time, lib_page):
+    page_obj = explore_mod.search(_search_client_instance(), mode, keyword,
+                                  lib_page, sort, time)
+    return explore_mod.to_items(page_obj), int(getattr(page_obj, "total", 0) or 0)
+
+
 def explore_search(mode, keyword, ui_page, sort, time):
-    """探索页检索：按「库页 80 条 / 界面页 20 条」取一页。
+    """探索页检索：按「库页 80 条 / 界面页 18 条」取一页。
 
     **封面只回传 URL**，由 Kotlin 侧原生取图并缓存 —— 图片处理优先原生，
     也避免把图片字节来回跨 JNI。
@@ -262,25 +317,32 @@ def explore_search(mode, keyword, ui_page, sort, time):
         from core import explore as explore_mod
 
         ui_page = max(1, int(ui_page))
-        lib_page_size = explore_mod.LIB_PAGE_SIZE
-        lib_page = (ui_page - 1) * _SEARCH_PER_UI_PAGE // lib_page_size + 1
+        key = (str(mode), str(keyword), str(sort), str(time))
+        loader = lambda lib_page: _search_lib_page(  # noqa: E731
+            explore_mod, mode, keyword, sort, time, lib_page)
+        window, total = _ui_window(_search_cache, key, ui_page, loader)
+        return _ok(items=[_item_json(item) for item in window],
+                   total=total, ui_page=ui_page)
+    except Exception as exc:
+        return _fail(exc)
 
-        key = (str(mode), str(keyword), str(sort), str(time), lib_page)
-        cached = _search_cache.get(key)
-        if cached is None:
-            page_obj = explore_mod.search(_search_client_instance(), mode, keyword,
-                                          lib_page, sort, time)
-            items = explore_mod.to_items(page_obj)
-            total = int(getattr(page_obj, "total", 0) or 0)
-            _search_cache[key] = (items, total)
-            while len(_search_cache) > _SEARCH_CACHE_MAX:
-                _search_cache.pop(next(iter(_search_cache)))
-        else:
-            items, total = cached
 
-        offset = (ui_page - 1) % (lib_page_size // _SEARCH_PER_UI_PAGE) * _SEARCH_PER_UI_PAGE
-        result = [_item_json(item) for item in items[offset:offset + _SEARCH_PER_UI_PAGE]]
-        return _ok(items=result, total=total, ui_page=ui_page)
+def ranking(kind, ui_page=1):
+    """榜单（日 / 周 / 月）：取一页（界面每页 18 条，库每页 80 条）。"""
+    try:
+        from core import explore as explore_mod
+
+        kind = str(kind or explore_mod.DEFAULT_RANKING)
+        ui_page = max(1, int(ui_page))
+
+        def loader(lib_page):
+            page_obj = explore_mod.ranking(_search_client_instance(), kind, lib_page)
+            return (explore_mod.to_items(page_obj),
+                    int(getattr(page_obj, "total", 0) or 0))
+
+        window, total = _ui_window(_ranking_cache, kind, ui_page, loader)
+        return _ok(items=[_item_json(item) for item in window],
+                   total=total, ui_page=ui_page)
     except Exception as exc:
         return _fail(exc)
 
@@ -447,6 +509,21 @@ def _tags_text(tags, limit=None):
     return ", ".join(str(item) for item in items)
 
 
+def _str_list(value):
+    """把标签 / 作者 / 角色统一成去重的字符串列表（兼容 ``{分组: [值]}`` 字典）。"""
+    if isinstance(value, dict):
+        flat = []
+        for item in value.values():
+            flat.extend(item if isinstance(item, list) else [item])
+        value = flat
+    out = []
+    for item in (value or []):
+        text = str(item or "").strip()
+        if text and text not in out:
+            out.append(text)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # 本子详情页
 # ---------------------------------------------------------------------------
@@ -457,8 +534,10 @@ _preview_cache = {}
 
 
 def album_detail(album_id):
-    """本子详情：标题 / 作者 / 标签 / 点赞数 / 观看数 / 页数 / 章节数 / 收藏状态 + 链接。
+    """本子详情：标题 / 作者 / 标签 / 角色 / 点赞数 / 观看数 / 页数 / 章节数 / 收藏与点赞状态 + 链接。
 
+    标签、作者、角色都回**字符串列表**（供界面渲染成可点击的圆角标签并跳转对应检索）；
+    另外保留 ``author``（拼成一行的作者名）与 ``tags``（拼成一行的标签）以兼容旧调用方。
     **封面只回传 URL**（由 Kotlin 原生取图），与探索页、下载页的「搜索 ID」一致。
     """
     try:
@@ -467,19 +546,132 @@ def album_detail(album_id):
             raise ValueError("本子 ID 为空")
         from core.downloader import album_url, cover_url
         album = _search_client_instance().get_album_detail(aid)
+        tags = _str_list(getattr(album, "tags", None))
+        authors = _str_list(getattr(album, "authors", None))
+        actors = _str_list(getattr(album, "actors", None))
         return _ok(
             id=str(album.album_id),
             title=album.name or "",
-            author=", ".join(str(name) for name in (album.authors or [])),
-            tags=_tags_text(album.tags),
+            author=", ".join(authors),
+            tags=", ".join(tags),
+            tag_list=tags,
+            author_list=authors,
+            actor_list=actors,
             likes=_count_text(album.likes),
             views=_count_text(album.views),
+            liked=bool(getattr(album, "liked", False)),
+            comment_count=int(getattr(album, "comment_count", 0) or 0),
             pages=int(getattr(album, "page_count", 0) or 0),
             chapters=len(album),
             favorited=bool(getattr(album, "is_favorite", False)),
             cover_url=cover_url(album.album_id),
             url=album_url(album.album_id),
         )
+    except Exception as exc:
+        return _fail(exc)
+
+
+def _resp_data(resp):
+    """把一次 ``req_api`` 的响应体读成 dict（非 JSON / 解析失败时回空 dict）。"""
+    try:
+        data = resp.model_data
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def album_like(album_id):
+    """本子点赞 / 取消点赞。
+
+    站点没有公开的「取消赞」文档，移动端接口也没有封装；这里调站点 ``/like`` 路由
+    （Toggle 语义），随后**重新拉一次详情**，以服务端的 ``liked`` 为准回传，
+    避免界面自己猜测状态。未登录时服务端通常不会改变状态，界面据回传值如实显示。
+    """
+    try:
+        aid = str(album_id or "").strip()
+        if not aid:
+            raise ValueError("本子 ID 为空")
+        client = _search_client_instance()
+        resp = client.req_api("/like", get=False, require_success=False,
+                              data={"id": aid})
+        data = _resp_data(resp)
+        status = str((data or {}).get("status") or "").strip().lower()
+        accepted = status in ("success", "ok", "true", "1")
+        album = client.get_album_detail(aid)
+        return _ok(liked=bool(getattr(album, "liked", False)),
+                   likes=_count_text(album.likes),
+                   accepted=accepted,
+                   msg=str((data or {}).get("msg") or ""))
+    except Exception as exc:
+        return _fail(exc)
+
+
+def album_comments(album_id, page=1):
+    """本子评论一页（只读）：主评论 + 每条的回复，均按层级拍平回传。"""
+    try:
+        aid = str(album_id or "").strip()
+        if not aid:
+            raise ValueError("本子 ID 为空")
+        page_obj = _search_client_instance().album_pagination(aid, page=max(1, int(page)))
+        items = [_comment_json(comment) for comment in page_obj]
+        return _ok(
+            items=items,
+            total=int(getattr(page_obj, "total", 0) or 0),
+            comment_count=int(getattr(page_obj, "comment_count", 0) or 0),
+            page=int(page),
+        )
+    except Exception as exc:
+        return _fail(exc)
+
+
+def _comment_json(comment):
+    """一条评论转成界面字段（回复递归展开）。"""
+    replies = []
+    for reply in (getattr(comment, "replies", None) or []):
+        try:
+            replies.append(_comment_json(reply))
+        except Exception:
+            continue
+    return {
+        "id": str(getattr(comment, "comment_id", "") or ""),
+        "user": str(getattr(comment, "nickname", "")
+                    or getattr(comment, "username", "") or ""),
+        "content": str(getattr(comment, "content", "") or ""),
+        "spoiler": bool(getattr(comment, "is_spoiler", False)),
+        "likes": int(getattr(comment, "likes", 0) or 0),
+        "created": str(getattr(comment, "created_at", "") or ""),
+        "replies": replies,
+    }
+
+
+def album_comment_post(album_id, content, spoiler=False):
+    """发表评论（需登录）。
+
+    移动端接口未封装评论发布，这里直接调站点 ``/comment`` 路由，参数名沿用网页端表单
+    （``video_id / comment / originator / status``）；服务端返回什么就如实回传，
+    成功与否以 ``success`` 字段表示，失败时把服务端的原文提示带出来。
+    """
+    try:
+        from core import account as account_store
+        aid = str(album_id or "").strip()
+        text = str(content or "").strip()
+        if not aid:
+            raise ValueError("本子 ID 为空")
+        if not text:
+            raise ValueError("评论内容不能为空")
+        if not account_store.is_logged_in():
+            return _ok(success=False, msg="请先登录后再发表评论")
+        resp = _search_client_instance().req_api(
+            "/comment", get=False, require_success=False,
+            data={"video_id": aid, "comment": text, "originator": "",
+                  "status": "true" if spoiler else "false"})
+        data = _resp_data(resp)
+        status = str((data or {}).get("status") or "").strip().lower()
+        success = status in ("success", "ok", "true", "1")
+        msg = str((data or {}).get("msg") or (data or {}).get("error") or "")
+        if not success and not msg:
+            msg = "HTTP %s" % getattr(resp, "status_code", "")
+        return _ok(success=success, msg=msg)
     except Exception as exc:
         return _fail(exc)
 
@@ -834,6 +1026,151 @@ def favorite_page(page=1, folder_id="0"):
             page=int(page),
             page_size=int(favorite_mod.LIB_PAGE_SIZE),
         )
+    except Exception as exc:
+        return _fail(exc)
+
+
+# ---------------------------------------------------------------------------
+# tag 收藏（本地存储 + 本地收藏夹）
+#
+# 官方没有 tag 收藏接口，因此全部落在本地（见 core.collection），与浏览历史共用
+# 同一个加密文件，且**不按账号隔离**。收藏夹同样只在本地，交互对齐「本子收藏」。
+# ---------------------------------------------------------------------------
+
+def _folder_json(folder):
+    return {"id": folder["id"], "name": folder["name"],
+            "default": bool(folder.get("default"))}
+
+
+def tag_folders():
+    """本地 tag 收藏夹列表（不含「全部」——那一项由界面自己补，便于本地化）。"""
+    try:
+        from core import collection
+        return _ok(folders=[_folder_json(folder) for folder in collection.folders()])
+    except Exception as exc:
+        return _fail(exc)
+
+
+def tag_folder_create(name):
+    """新建一个本地 tag 收藏夹，返回它（同名直接复用）。"""
+    try:
+        from core import collection
+        return _ok(folder=_folder_json(collection.create_folder(name)))
+    except Exception as exc:
+        return _fail(exc)
+
+
+def tag_preview(limit=0):
+    """账号页预览：最前面的若干条 tag 收藏。"""
+    try:
+        from core import collection
+        count = int(limit) if int(limit) > 0 else collection.TAG_PREVIEW
+        return _ok(items=collection.tag_preview(count))
+    except Exception as exc:
+        return _fail(exc)
+
+
+def tag_add(name, folder_id="1"):
+    """收藏一个 tag（可指定收藏夹）。"""
+    try:
+        from core import collection
+        collection.add_tag(str(name or ""), str(folder_id or collection.DEFAULT_FOLDER_ID))
+        return _ok()
+    except Exception as exc:
+        return _fail(exc)
+
+
+def tag_remove(name):
+    """取消收藏一个 tag。"""
+    try:
+        from core import collection
+        return _ok(removed=collection.remove_tag(str(name or "")))
+    except Exception as exc:
+        return _fail(exc)
+
+
+def tag_move(name, folder_id):
+    """把一个 tag 移到指定收藏夹。"""
+    try:
+        from core import collection
+        return _ok(moved=collection.move_tag(str(name or ""), str(folder_id or "")))
+    except Exception as exc:
+        return _fail(exc)
+
+
+def tag_page(page=1, folder_id="0"):
+    """tag 收藏完整页一页：条目 + 全部收藏夹 + 总数。"""
+    try:
+        from core import collection
+        result = collection.tag_page(int(page), str(folder_id or collection.FOLDER_ALL))
+        return _ok(
+            items=result["items"],
+            folders=[_folder_json(folder) for folder in result["folders"]],
+            total=result["total"],
+            page=result["page"],
+            page_size=result["page_size"],
+        )
+    except Exception as exc:
+        return _fail(exc)
+
+
+# ---------------------------------------------------------------------------
+# 浏览历史（本地存储，只记本子）
+# ---------------------------------------------------------------------------
+
+def history_add(album_id, name="", author=""):
+    """记录一次本子浏览（详情页加载成功时调用）；重复浏览提到最前。"""
+    try:
+        from core import collection
+        return _ok(added=collection.history_add(str(album_id or ""), name, author))
+    except Exception as exc:
+        return _fail(exc)
+
+
+def history_preview(limit=0):
+    """账号页预览：最近浏览的若干本（带封面 URL）。"""
+    try:
+        from core import collection
+        count = int(limit) if int(limit) > 0 else collection.HISTORY_PREVIEW
+        return _ok(items=[_item_json(row) for row in collection.history_preview(count)])
+    except Exception as exc:
+        return _fail(exc)
+
+
+def history_page(page=1, keyword=""):
+    """浏览历史完整页一页（支持按本子 ID / 名称 / 作者搜索）。"""
+    try:
+        from core import collection
+        result = collection.history_page(int(page), str(keyword or ""))
+        return _ok(
+            items=[_item_json(row) for row in result["items"]],
+            total=result["total"],
+            page=result["page"],
+            page_size=result["page_size"],
+        )
+    except Exception as exc:
+        return _fail(exc)
+
+
+# ---------------------------------------------------------------------------
+# 本地收藏数据的导出 / 导入（设置页；与配置导入导出并列）
+# ---------------------------------------------------------------------------
+
+def local_data_export_text():
+    """把本地收藏（tag 收藏 + 收藏夹 + 浏览历史）导出成 JSON 文本。"""
+    try:
+        from core import collection
+        return _ok(text=collection.export_text())
+    except Exception as exc:
+        return _fail(exc)
+
+
+def local_data_import_text(text):
+    """从 JSON 文本导入本地收藏，整体覆盖现有内容。"""
+    try:
+        from core import collection
+        collection.import_text(text)
+        return _ok()
     except Exception as exc:
         return _fail(exc)
 

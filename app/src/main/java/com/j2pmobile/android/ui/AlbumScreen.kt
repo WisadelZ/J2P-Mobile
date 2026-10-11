@@ -22,13 +22,18 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -49,6 +54,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -68,15 +74,18 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.j2pmobile.android.AlbumDetail
 import com.j2pmobile.android.ApiBridge
 import com.j2pmobile.android.ApiResult
+import com.j2pmobile.android.CommentItem
 import com.j2pmobile.android.FavoriteFolder
 import com.j2pmobile.android.LogBridge
 import com.j2pmobile.android.PreviewPageMeta
 import com.j2pmobile.android.R
 import com.j2pmobile.android.ReaderSource
+import com.j2pmobile.android.TagFolder
 import com.j2pmobile.android.ui.components.CoverImage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -108,12 +117,15 @@ private val ZOOM_SCRIM = Color(0xCC000000)
  * - 「浏览」走在线浏览（按需取页、逐页解密），打开期间按钮禁用并提示「正在打开浏览…」；
  * - 预览字节逐页取、缩略图按目标宽度降采样解码，放大时才解全尺寸，避免一次占几十 MB。
  */
+@OptIn(ExperimentalLayoutApi::class, ExperimentalFoundationApi::class)
 @Composable
 fun AlbumScreen(
     albumId: String,
     queue: QueueState,
     saveDownloadConf: suspend () -> Unit,
     onAddToDownloadList: (String) -> Unit,
+    /** 标签 / 作者 / 角色点击：跳「对应类型」的搜索（mode, keyword）。 */
+    onOpenTypedSearch: (String, String) -> Unit,
     onOpenReader: (ReaderSource) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -124,6 +136,9 @@ fun AlbumScreen(
     var detail by remember { mutableStateOf<AlbumDetail?>(null) }
     var loadError by remember { mutableStateOf<String?>(null) }
     var favorited by remember { mutableStateOf(false) }
+    var liked by remember { mutableStateOf(false) }
+    var likesText by remember { mutableStateOf("") }
+    var likeLoading by remember { mutableStateOf(false) }
     var browseLoading by remember { mutableStateOf(false) }
 
     var metas by remember { mutableStateOf<List<PreviewPageMeta>>(emptyList()) }
@@ -143,6 +158,24 @@ fun AlbumScreen(
     var foldersError by remember { mutableStateOf<String?>(null) }
     var selectedFolder by remember { mutableStateOf("0") }
 
+    // ---- tag 收藏（长按标签弹出：与「本子收藏」同款选收藏夹 / 新建收藏夹交互）
+    var collectTag by remember { mutableStateOf<String?>(null) }
+    var tagFolders by remember { mutableStateOf<List<TagFolder>>(emptyList()) }
+    var tagFolderLoading by remember { mutableStateOf(false) }
+    var tagFolderError by remember { mutableStateOf<String?>(null) }
+    var tagFolderSel by remember { mutableStateOf("") }
+    var newTagFolderName by remember { mutableStateOf("") }
+
+    // ---- 网站评论
+    var comments by remember { mutableStateOf<List<CommentItem>>(emptyList()) }
+    var commentPage by remember { mutableStateOf(1) }
+    var commentTotal by remember { mutableStateOf(0) }
+    var commentCount by remember { mutableStateOf(0) }
+    var commentsLoading by remember { mutableStateOf(false) }
+    var commentError by remember { mutableStateOf<String?>(null) }
+    var commentInput by remember { mutableStateOf("") }
+    var commentPosting by remember { mutableStateOf(false) }
+
     var statusRes by remember { mutableStateOf(R.string.status_ready) }
     var statusArg by remember { mutableStateOf<String?>(null) }
     var statusKind by remember { mutableStateOf(StatusKind.IDLE) }
@@ -157,10 +190,18 @@ fun AlbumScreen(
     LaunchedEffect(albumId) {
         loading = true
         loadError = null
+        // 一进详情页就记一条浏览历史（先只带 ID，标题 / 作者拿到后再补写一次）：
+        // 取详情要联网，等它回来才记的话，用户会觉得「看了半天才计入」。
+        ApiBridge.historyAdd(albumId)
         when (val result = ApiBridge.albumDetail(albumId)) {
             is ApiResult.Ok -> {
                 detail = result.value
                 favorited = result.value.favorited
+                liked = result.value.liked
+                likesText = result.value.likes
+                commentCount = result.value.commentCount
+                // 补全标题与作者（本地收藏文件；不按账号隔离）
+                ApiBridge.historyAdd(albumId, result.value.title, result.value.author)
             }
 
             is ApiResult.Err -> loadError = result.message
@@ -209,6 +250,97 @@ fun AlbumScreen(
             is ApiResult.Err -> previewError = result.message
         }
         previewLoading = false
+    }
+
+    /** 加载评论：首页替换、后续页追加。 */
+    fun loadComments(page: Int, append: Boolean) {
+        if (commentsLoading) return
+        commentsLoading = true
+        commentError = null
+        scope.launch {
+            when (val result = ApiBridge.albumComments(albumId, page)) {
+                is ApiResult.Ok -> {
+                    commentPage = result.value.page
+                    commentTotal = result.value.total
+                    if (result.value.commentCount > 0) commentCount = result.value.commentCount
+                    comments = if (append) comments + result.value.items else result.value.items
+                }
+
+                is ApiResult.Err -> commentError = result.message
+            }
+            commentsLoading = false
+        }
+    }
+
+    // 评论与详情并行拉取：评论慢或失败都不影响详情展示
+    LaunchedEffect(albumId) { loadComments(1, append = false) }
+
+    /** 点赞 / 取消点赞：以服务端返回的最终状态为准。 */
+    fun toggleLike() {
+        if (likeLoading) return
+        likeLoading = true
+        scope.launch {
+            when (val result = ApiBridge.albumLike(albumId)) {
+                is ApiResult.Ok -> {
+                    liked = result.value.liked
+                    if (result.value.likes.isNotEmpty()) likesText = result.value.likes
+                    setStatus(
+                        if (result.value.liked) R.string.status_like_ok else R.string.status_like_removed,
+                        StatusKind.OK,
+                    )
+                }
+
+                is ApiResult.Err -> setStatus(R.string.status_like_failed, StatusKind.ERR, result.message)
+            }
+            likeLoading = false
+        }
+    }
+
+    /** 长按标签：打开「收藏标签」弹窗并拉取本地收藏夹。 */
+    fun openTagCollect(tag: String) {
+        collectTag = tag
+        newTagFolderName = ""
+        tagFolderLoading = true
+        tagFolderError = null
+        tagFolders = emptyList()
+        tagFolderSel = ""
+        scope.launch {
+            when (val result = ApiBridge.tagFolders()) {
+                is ApiResult.Ok -> {
+                    tagFolders = result.value
+                    tagFolderSel = result.value.firstOrNull { it.isDefault }?.id
+                        ?: result.value.firstOrNull()?.id.orEmpty()
+                }
+
+                is ApiResult.Err -> tagFolderError = result.message
+            }
+            tagFolderLoading = false
+        }
+    }
+
+    /** 发表评论：未登录或服务端拒绝时原样回传提示。 */
+    fun postComment() {
+        val content = commentInput.trim()
+        if (content.isEmpty() || commentPosting) return
+        commentPosting = true
+        scope.launch {
+            when (val result = ApiBridge.albumCommentPost(albumId, content)) {
+                is ApiResult.Ok -> {
+                    if (result.value.success) {
+                        commentInput = ""
+                        setStatus(R.string.status_comment_posted, StatusKind.OK)
+                        loadComments(1, append = false)
+                    } else {
+                        setStatus(R.string.status_comment_failed, StatusKind.ERR, result.value.msg)
+                    }
+                }
+
+                is ApiResult.Err -> setStatus(
+                    R.string.status_comment_failed, StatusKind.ERR, result.message
+                )
+            }
+            commentPosting = false
+        }
     }
 
     // 放大层开着时，返回键先关它
@@ -329,7 +461,12 @@ fun AlbumScreen(
                             color = MaterialTheme.colorScheme.error,
                         )
 
-                        detail != null -> AlbumInfo(detail!!)
+                        detail != null -> AlbumInfo(
+                            detail = detail!!,
+                            likesText = likesText,
+                            onOpenTypedSearch = onOpenTypedSearch,
+                            onCollectTag = { openTagCollect(it) },
+                        )
                     }
                 }
             }
@@ -395,6 +532,30 @@ fun AlbumScreen(
                     Text(stringResource(R.string.btn_favorite), maxLines = 1)
                 }
             }
+            // 点赞：与本子收藏是两回事，单独一行，图标随状态切换
+            OutlinedButton(
+                onClick = { toggleLike() },
+                enabled = !likeLoading,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                if (likeLoading) {
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                } else {
+                    Icon(
+                        painter = painterResource(
+                            if (liked) R.drawable.ic_favorite else R.drawable.ic_favorite_border
+                        ),
+                        contentDescription = null,
+                        tint = if (liked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    text = stringResource(if (liked) R.string.btn_liked else R.string.btn_like),
+                    maxLines = 1,
+                )
+            }
             // 在线浏览独占一行：这是详情页最常用的动作，按钮做大一点
             OutlinedButton(
                 onClick = { browseOnline() },
@@ -413,6 +574,12 @@ fun AlbumScreen(
                 Spacer(Modifier.width(6.dp))
                 Text(stringResource(R.string.btn_browse), maxLines = 1)
             }
+            // 标签能力说明：圆角方框看着可点，这里把「点一下搜索、长按收藏」讲清楚
+            Text(
+                text = stringResource(R.string.album_tag_hint),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
 
             // ---------------- 预览前几页 ----------------
             if (previewEnabled) {
@@ -424,6 +591,22 @@ fun AlbumScreen(
                     onOpen = { zoomIndex = it },
                 )
             }
+
+            // ---------------- 网站评论 ----------------
+            HorizontalDivider()
+            CommentSection(
+                comments = comments,
+                total = commentTotal,
+                loadedPage = commentPage,
+                count = commentCount,
+                loading = commentsLoading,
+                error = commentError,
+                input = commentInput,
+                posting = commentPosting,
+                onInputChange = { commentInput = it },
+                onPost = { postComment() },
+                onLoadMore = { loadComments(commentPage + 1, append = true) },
+            )
 
             StatusLine(statusRes, statusArg, statusKind)
         }
@@ -517,34 +700,352 @@ fun AlbumScreen(
             },
         )
     }
+
+    // ---------------- 收藏标签弹窗（长按标签进入，交互与本子收藏类似） ----------------
+    collectTag?.let { tag ->
+        AlertDialog(
+            onDismissRequest = { collectTag = null },
+            title = { Text(stringResource(R.string.tag_collect_title)) },
+            text = {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text(
+                        text = stringResource(R.string.tag_collect_tag, tag),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    when {
+                        tagFolderLoading -> Text(
+                            text = stringResource(R.string.favorite_choose_loading),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+
+                        tagFolderError != null -> Text(
+                            text = stringResource(R.string.favorite_choose_failed, tagFolderError!!),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+
+                        else -> tagFolders.forEach { folder ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { tagFolderSel = folder.id }
+                                    .padding(vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                RadioButton(
+                                    selected = tagFolderSel == folder.id,
+                                    onClick = { tagFolderSel = folder.id },
+                                )
+                                Text(
+                                    text = if (folder.isDefault) {
+                                        stringResource(R.string.favorite_folder_default)
+                                    } else {
+                                        folder.name
+                                    },
+                                    style = MaterialTheme.typography.bodyMedium,
+                                )
+                            }
+                        }
+                    }
+                    HorizontalDivider()
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedTextField(
+                            value = newTagFolderName,
+                            onValueChange = { newTagFolderName = it },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f),
+                            label = { Text(stringResource(R.string.tag_folder_name_hint)) },
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        TextButton(
+                            enabled = newTagFolderName.trim().isNotEmpty(),
+                            onClick = {
+                                val name = newTagFolderName.trim()
+                                scope.launch {
+                                    when (val result = ApiBridge.tagFolderCreate(name)) {
+                                        is ApiResult.Ok -> {
+                                            newTagFolderName = ""
+                                            tagFolders = tagFolders + result.value
+                                            tagFolderSel = result.value.id
+                                        }
+
+                                        is ApiResult.Err -> setStatus(
+                                            R.string.status_tag_folder_failed,
+                                            StatusKind.ERR,
+                                            result.message,
+                                        )
+                                    }
+                                }
+                            },
+                        ) {
+                            Text(stringResource(R.string.tag_new_folder))
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !tagFolderLoading && tagFolderError == null && tagFolderSel.isNotEmpty(),
+                    onClick = {
+                        val folderId = tagFolderSel
+                        collectTag = null
+                        scope.launch {
+                            when (val result = ApiBridge.tagAdd(tag, folderId)) {
+                                is ApiResult.Ok ->
+                                    setStatus(R.string.status_tag_added, StatusKind.OK, tag)
+
+                                is ApiResult.Err -> setStatus(
+                                    R.string.status_tag_add_failed, StatusKind.ERR, result.message
+                                )
+                            }
+                        }
+                    },
+                ) {
+                    Text(stringResource(R.string.btn_confirm))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { collectTag = null }) {
+                    Text(stringResource(R.string.btn_cancel))
+                }
+            },
+        )
+    }
 }
 
-/** 本子信息：标题 / ID / 作者 / 标签 / 点赞与观看 / 页数与章节（可长按选中复制）。 */
+/**
+ * 本子信息：标题 / ID / 作者 / 标签 / 角色 / 点赞与观看 / 页数与章节。
+ *
+ * 作者 / 标签 / 角色都渲染成可点击的圆角标签（高度固定、长度自适应）：点击跳「对应类型」的
+ * 搜索；长按标签则收藏该标签（选收藏夹或新建收藏夹，与本子收藏同款交互）。
+ * 「角色」位于「标签」下一行、「点赞数 / 观看数」上一行。
+ */
+@OptIn(ExperimentalLayoutApi::class, ExperimentalFoundationApi::class)
 @Composable
-private fun AlbumInfo(detail: AlbumDetail) {
-    SelectionContainer {
-        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            InfoRow(stringResource(R.string.meta_title), detail.title)
-            InfoRow(stringResource(R.string.meta_album_id), detail.id)
-            InfoRow(stringResource(R.string.meta_author), detail.author)
-            InfoRow(stringResource(R.string.meta_tags), detail.tags)
-            Row {
-                Box(Modifier.weight(1f)) {
-                    InfoRow(stringResource(R.string.meta_likes), detail.likes)
-                }
-                Box(Modifier.weight(1f)) {
-                    InfoRow(stringResource(R.string.meta_views), detail.views)
-                }
+private fun AlbumInfo(
+    detail: AlbumDetail,
+    likesText: String,
+    onOpenTypedSearch: (String, String) -> Unit,
+    onCollectTag: (String) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        SelectionContainer {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                InfoRow(stringResource(R.string.meta_title), detail.title)
+                InfoRow(stringResource(R.string.meta_album_id), detail.id)
             }
-            Row {
-                Box(Modifier.weight(1f)) {
-                    InfoRow(stringResource(R.string.meta_pages), detail.pages.toString())
+        }
+        ChipRow(
+            label = stringResource(R.string.meta_author),
+            values = detail.authorList.ifEmpty { listOf(detail.author).filter { it.isNotEmpty() } },
+            onClick = { onOpenTypedSearch("author", it) },
+            onLongClick = null,
+        )
+        ChipRow(
+            label = stringResource(R.string.meta_tags),
+            values = detail.tagList.ifEmpty { listOf(detail.tags).filter { it.isNotEmpty() } },
+            onClick = { onOpenTypedSearch("tag", it) },
+            onLongClick = onCollectTag,
+        )
+        ChipRow(
+            label = stringResource(R.string.meta_actors),
+            values = detail.actorList,
+            onClick = { onOpenTypedSearch("actor", it) },
+            onLongClick = null,
+        )
+        SelectionContainer {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row {
+                    Box(Modifier.weight(1f)) {
+                        InfoRow(stringResource(R.string.meta_likes), likesText)
+                    }
+                    Box(Modifier.weight(1f)) {
+                        InfoRow(stringResource(R.string.meta_views), detail.views)
+                    }
                 }
-                Box(Modifier.weight(1f)) {
-                    InfoRow(stringResource(R.string.meta_chapters), detail.chapters.toString())
+                Row {
+                    Box(Modifier.weight(1f)) {
+                        InfoRow(stringResource(R.string.meta_pages), detail.pages.toString())
+                    }
+                    Box(Modifier.weight(1f)) {
+                        InfoRow(stringResource(R.string.meta_chapters), detail.chapters.toString())
+                    }
                 }
             }
         }
+    }
+}
+
+/** 一行可点击标签：小标题 + 自动换行的圆角标签。 */
+@OptIn(ExperimentalLayoutApi::class, ExperimentalFoundationApi::class)
+@Composable
+private fun ChipRow(
+    label: String,
+    values: List<String>,
+    onClick: (String) -> Unit,
+    onLongClick: ((String) -> Unit)?,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (values.isEmpty()) {
+            Text(text = "—", style = MaterialTheme.typography.bodySmall)
+        } else {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                values.forEach { value ->
+                    TagChip(
+                        text = value,
+                        onClick = { onClick(value) },
+                        onLongClick = onLongClick?.let { click -> { click(value) } },
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** 自适应长度、高度固定的圆角方框：明示可点击；长按做次要动作（收藏标签）。 */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun TagChip(text: String, onClick: () -> Unit, onLongClick: (() -> Unit)?) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(12.dp))
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(12.dp))
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelMedium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+/** 网站评论区：标题 + 发表框 + 列表（可「加载更多」）。 */
+@Composable
+private fun CommentSection(
+    comments: List<CommentItem>,
+    total: Int,
+    loadedPage: Int,
+    count: Int,
+    loading: Boolean,
+    error: String?,
+    input: String,
+    posting: Boolean,
+    onInputChange: (String) -> Unit,
+    onPost: () -> Unit,
+    onLoadMore: () -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            text = if (count > 0) {
+                stringResource(R.string.comments_title_count, count)
+            } else {
+                stringResource(R.string.comments_title)
+            },
+            style = MaterialTheme.typography.titleSmall,
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(
+                value = input,
+                onValueChange = onInputChange,
+                modifier = Modifier.weight(1f),
+                maxLines = 3,
+                placeholder = {
+                    Text(
+                        text = stringResource(R.string.comment_hint),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                },
+            )
+            Spacer(Modifier.width(8.dp))
+            Button(onClick = onPost, enabled = !posting && input.trim().isNotEmpty()) {
+                Text(stringResource(R.string.btn_post_comment), maxLines = 1)
+            }
+        }
+        when {
+            error != null -> Text(
+                text = stringResource(R.string.comment_load_failed, error),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+
+            loading && comments.isEmpty() -> Text(
+                text = stringResource(R.string.comment_loading),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            comments.isEmpty() -> Text(
+                text = stringResource(R.string.comment_empty),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            else -> comments.forEach { CommentRow(it, 0) }
+        }
+        if (!loading && comments.isNotEmpty() && total > loadedPage) {
+            TextButton(onClick = onLoadMore, modifier = Modifier.fillMaxWidth()) {
+                Text(stringResource(R.string.comment_load_more))
+            }
+        }
+    }
+}
+
+/** 单条评论（含递归的回复）；剧透内容默认遮蔽，点一下才展开。 */
+@Composable
+private fun CommentRow(comment: CommentItem, depth: Int) {
+    var revealed by remember(comment.id) { mutableStateOf(!comment.spoiler) }
+    Column(
+        modifier = Modifier.padding(start = (depth * 16).dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = comment.user,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            Spacer(Modifier.width(8.dp))
+            if (comment.created.isNotEmpty()) {
+                Text(
+                    text = comment.created,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        if (comment.spoiler && !revealed) {
+            Text(
+                text = stringResource(R.string.comment_spoiler_content),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.clickable { revealed = true },
+            )
+        } else {
+            Text(text = comment.content, style = MaterialTheme.typography.bodySmall)
+        }
+        if (comment.likes > 0) {
+            Text(
+                text = stringResource(R.string.comment_likes, comment.likes),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        comment.replies.forEach { CommentRow(it, depth + 1) }
     }
 }
 

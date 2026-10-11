@@ -22,6 +22,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -75,6 +77,7 @@ import com.j2pmobile.android.ApiBridge
 import com.j2pmobile.android.ApiResult
 import com.j2pmobile.android.CheckinResult
 import com.j2pmobile.android.R
+import com.j2pmobile.android.TagItem
 import com.j2pmobile.android.ui.components.AlbumCard
 import com.j2pmobile.android.ui.components.CoverImage
 import kotlinx.coroutines.launch
@@ -113,10 +116,26 @@ class AccountState {
     var loggingIn by mutableStateOf(false)
     var checkingIn by mutableStateOf(false)
 
+    /**
+     * 预览作废序号：外部（清缓存 / 导入本地数据 / 刷新）把数据标记为过期时 +1，
+     * 三个预览的 [LaunchedEffect] 都以它为 key，从而重新拉取。
+     */
+    var previewSeq by mutableStateOf(0)
+
     // ---- 收藏预览（null = 还没取过）
     var preview by mutableStateOf<List<AlbumItem>?>(null)
     var previewError by mutableStateOf<String?>(null)
     var favoritesExpanded by mutableStateOf(true)
+
+    // ---- tag 收藏预览（本地存储，与账号无关；null = 还没取过）
+    var tagPreview by mutableStateOf<List<TagItem>?>(null)
+    var tagPreviewError by mutableStateOf<String?>(null)
+    var tagsExpanded by mutableStateOf(true)
+
+    // ---- 浏览历史预览（本地存储，与账号无关；null = 还没取过）
+    var historyPreview by mutableStateOf<List<AlbumItem>?>(null)
+    var historyPreviewError by mutableStateOf<String?>(null)
+    var historyExpanded by mutableStateOf(true)
 
     var statusRes by mutableStateOf(R.string.status_ready)
     var statusArg by mutableStateOf<String?>(null)
@@ -153,6 +172,12 @@ fun AccountScreen(
     state: AccountState,
     onOpenAlbum: (String) -> Unit,
     onOpenFavorites: () -> Unit,
+    /** 「tag 收藏」折叠菜单的「查看更多」：进 tag 收藏完整页。 */
+    onOpenTagFavorites: () -> Unit,
+    /** 「浏览历史」折叠菜单的「查看更多」：进浏览历史完整页。 */
+    onOpenHistory: () -> Unit,
+    /** 账号页预览的 tag 只做一件事：按「全部」搜索跳走。 */
+    onOpenTagSearch: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val scope = rememberCoroutineScope()
@@ -175,15 +200,58 @@ fun AccountScreen(
         state.loading = false
     }
 
-    // 收藏预览：换了账号（profile 变成另一个用户名）且还没取过时拉一次
-    LaunchedEffect(state.profile?.username, state.pickerMode) {
+    // 收藏预览：进账号页就拉一次（账号页只展示前 9 本）。
+    //
+    // **不要**用「已经取过就跳过」的守卫：账号页在离开（去详情 / 收藏页 / 搜索页）时
+    // 会离开组合，回来时本副作用会重新执行 —— 正好借它拿到最新数据，
+    // 否则刚浏览完回到账号页，看到的还是上一次的旧列表。
+    LaunchedEffect(state.profile?.username, state.pickerMode, state.previewSeq) {
         if (state.profile == null || state.pickerMode) return@LaunchedEffect
-        if (state.preview != null || state.previewError != null) return@LaunchedEffect
-        when (val result = ApiBridge.favoritePreview()) {
-            is ApiResult.Ok -> state.preview = result.value
+        when (val result = ApiBridge.favoritePreview(9)) {
+            is ApiResult.Ok -> {
+                state.preview = result.value
+                state.previewError = null
+            }
+
             is ApiResult.Err -> {
-                state.preview = emptyList()
-                state.previewError = result.message
+                // 这是「重新进入页面时的刷新」，失败不该把上一次的列表换成错误提示
+                // （收藏要看网络，偶发失败很常见）；只有本来就没有数据时才显示错误。
+                if (state.preview == null) {
+                    state.preview = emptyList()
+                    state.previewError = result.message
+                }
+            }
+        }
+    }
+
+    // tag 收藏预览（本地存储，与账号无关）：进账号页就拉一次，只展示前 8 个
+    LaunchedEffect(state.showLogin, state.previewSeq) {
+        if (state.showLogin) return@LaunchedEffect
+        when (val result = ApiBridge.tagPreview(8)) {
+            is ApiResult.Ok -> {
+                state.tagPreview = result.value
+                state.tagPreviewError = null
+            }
+
+            is ApiResult.Err -> {
+                state.tagPreview = emptyList()
+                state.tagPreviewError = result.message
+            }
+        }
+    }
+
+    // 浏览历史预览（本地存储，与账号无关）：进账号页就拉一次，只展示前 9 本
+    LaunchedEffect(state.showLogin, state.previewSeq) {
+        if (state.showLogin) return@LaunchedEffect
+        when (val result = ApiBridge.historyPreview(9)) {
+            is ApiResult.Ok -> {
+                state.historyPreview = result.value
+                state.historyPreviewError = null
+            }
+
+            is ApiResult.Err -> {
+                state.historyPreview = emptyList()
+                state.historyPreviewError = result.message
             }
         }
     }
@@ -316,11 +384,17 @@ fun AccountScreen(
         }
     }
 
-    /** 刷新账号数据：重新读账号状态 + 重新拉头像 / 状态 / 收藏预览。 */
+    /** 刷新账号数据：重新读账号状态 + 重新拉头像 / 状态 / 收藏预览（含本地 tag 收藏与历史）。 */
     fun refreshAccount() {
         state.setStatus(R.string.status_account_refreshing, StatusKind.IDLE)
         state.preview = null
         state.previewError = null
+        state.tagPreview = null
+        state.tagPreviewError = null
+        state.historyPreview = null
+        state.historyPreviewError = null
+        // 三个预览一起重取（收藏走网络，tag 收藏与历史走本地文件）
+        state.previewSeq += 1
         scope.launch {
             when (val result = ApiBridge.accountRefreshProfile()) {
                 is ApiResult.Ok -> {
@@ -365,6 +439,26 @@ fun AccountScreen(
                         items = state.preview,
                         error = state.previewError,
                         onOpenFavorites = onOpenFavorites,
+                        onOpenAlbum = onOpenAlbum,
+                    )
+                }
+                item {
+                    TagFavoritesSection(
+                        expanded = state.tagsExpanded,
+                        onToggleExpanded = { state.tagsExpanded = !state.tagsExpanded },
+                        items = state.tagPreview,
+                        error = state.tagPreviewError,
+                        onOpenTagFavorites = onOpenTagFavorites,
+                        onOpenTagSearch = onOpenTagSearch,
+                    )
+                }
+                item {
+                    HistorySection(
+                        expanded = state.historyExpanded,
+                        onToggleExpanded = { state.historyExpanded = !state.historyExpanded },
+                        items = state.historyPreview,
+                        error = state.historyPreviewError,
+                        onOpenHistory = onOpenHistory,
                         onOpenAlbum = onOpenAlbum,
                     )
                 }
@@ -748,35 +842,12 @@ private fun FavoritesSection(
     onOpenAlbum: (String) -> Unit,
 ) {
     Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Row(
-                modifier = Modifier
-                    .weight(1f)
-                    .clickable(onClick = onToggleExpanded),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(
-                    painter = painterResource(R.drawable.ic_arrow_drop_down),
-                    contentDescription = null,
-                    modifier = Modifier.rotate(if (expanded) 180f else 0f),
-                )
-                Spacer(Modifier.width(4.dp))
-                Text(
-                    text = stringResource(R.string.favorite_title),
-                    style = MaterialTheme.typography.titleMedium,
-                )
-            }
-            if (expanded) {
-                TextButton(onClick = onOpenFavorites) {
-                    Text(stringResource(R.string.btn_view_more))
-                    Icon(
-                        painter = painterResource(R.drawable.ic_chevron_right),
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp),
-                    )
-                }
-            }
-        }
+        CollapsibleHeader(
+            titleRes = R.string.favorite_title,
+            expanded = expanded,
+            onToggleExpanded = onToggleExpanded,
+            onViewMore = onOpenFavorites,
+        )
         // 收起时不去读 items / error：那两个状态变化时就不必重排这一段
         if (expanded) {
             when {
@@ -822,6 +893,160 @@ private fun AlbumGridRows(items: List<AlbumItem>, onOpen: (String) -> Unit) {
                 repeat(3 - rowItems.size) { Spacer(Modifier.weight(1f)) }
             }
         }
+    }
+}
+
+/**
+ * tag 收藏折叠菜单（本地存储）。
+ *
+ * 账号页只展示前 8 个 tag：**自适应长度、高度固定的圆角方框**，且只能点击跳「全部」搜索，
+ * 不能移动收藏夹 / 删除；要完整管理走「查看更多」（含翻页与收藏夹的完整页）。
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun TagFavoritesSection(
+    expanded: Boolean,
+    onToggleExpanded: () -> Unit,
+    items: List<TagItem>?,
+    error: String?,
+    onOpenTagFavorites: () -> Unit,
+    onOpenTagSearch: (String) -> Unit,
+) {
+    Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        CollapsibleHeader(
+            titleRes = R.string.tag_favorite_title,
+            expanded = expanded,
+            onToggleExpanded = onToggleExpanded,
+            onViewMore = onOpenTagFavorites,
+        )
+        if (expanded) {
+            when {
+                error != null -> Text(
+                    text = stringResource(R.string.tag_favorite_load_failed, error),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+
+                items == null -> Text(
+                    text = stringResource(R.string.tag_favorite_loading),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
+                items.isEmpty() -> Text(
+                    text = stringResource(R.string.tag_favorite_empty),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
+                else -> FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    items.forEach { item ->
+                        TagPreviewChip(text = item.name, onClick = { onOpenTagSearch(item.name) })
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** 浏览历史折叠菜单（本地存储）：账号页只展示前 9 本，点封面进详情。 */
+@Composable
+private fun HistorySection(
+    expanded: Boolean,
+    onToggleExpanded: () -> Unit,
+    items: List<AlbumItem>?,
+    error: String?,
+    onOpenHistory: () -> Unit,
+    onOpenAlbum: (String) -> Unit,
+) {
+    Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        CollapsibleHeader(
+            titleRes = R.string.history_title,
+            expanded = expanded,
+            onToggleExpanded = onToggleExpanded,
+            onViewMore = onOpenHistory,
+        )
+        if (expanded) {
+            when {
+                error != null -> Text(
+                    text = stringResource(R.string.history_load_failed, error),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+
+                items == null -> Text(
+                    text = stringResource(R.string.history_loading),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
+                items.isEmpty() -> Text(
+                    text = stringResource(R.string.history_empty),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
+                else -> AlbumGridRows(items = items, onOpen = onOpenAlbum)
+            }
+        }
+    }
+}
+
+/** 折叠菜单标题行：箭头 + 标题（点击整行开合），展开时右侧出现「查看更多」。 */
+@Composable
+private fun CollapsibleHeader(
+    titleRes: Int,
+    expanded: Boolean,
+    onToggleExpanded: () -> Unit,
+    onViewMore: () -> Unit,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .clickable(onClick = onToggleExpanded),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                painter = painterResource(R.drawable.ic_arrow_drop_down),
+                contentDescription = null,
+                modifier = Modifier.rotate(if (expanded) 180f else 0f),
+            )
+            Spacer(Modifier.width(4.dp))
+            Text(text = stringResource(titleRes), style = MaterialTheme.typography.titleMedium)
+        }
+        if (expanded) {
+            TextButton(onClick = onViewMore) {
+                Text(stringResource(R.string.btn_view_more))
+                Icon(
+                    painter = painterResource(R.drawable.ic_chevron_right),
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+        }
+    }
+}
+
+/** 账号页的 tag 预览方框：自适应长度、高度固定；只做一件事——跳「全部」搜索。 */
+@Composable
+private fun TagPreviewChip(text: String, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(12.dp))
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelMedium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 

@@ -59,10 +59,25 @@ DEFAULT_TIME = "all"
 # 库每页返回的条数（与 JmModuleConfig.PAGE_SIZE_SEARCH 一致）
 LIB_PAGE_SIZE = 80
 
+# 榜单类型 -> jmcomic 客户端方法名
+RANKING_KINDS = {
+    "day": "day_ranking",       # 日榜
+    "week": "week_ranking",     # 周榜
+    "month": "month_ranking",   # 月榜
+}
+
+DEFAULT_RANKING = "day"
+
 
 def new_client(conf):
     """按当前配置创建一个 jmcomic 客户端，可重复使用（内部自带 cookies 与域名缓存）。"""
     return build_option(conf).new_jm_client()
+
+
+def ranking(client, kind, page=1):
+    """取日 / 周 / 月榜的一页（返回与搜索同构的页面，可直接用 :func:`to_items`）。"""
+    method = getattr(client, RANKING_KINDS.get(kind, RANKING_KINDS[DEFAULT_RANKING]))
+    return method(page)
 
 
 def search(client, mode, keyword, page=1, sort=DEFAULT_SORT, time=DEFAULT_TIME):

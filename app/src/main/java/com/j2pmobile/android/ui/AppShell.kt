@@ -114,6 +114,10 @@ fun AppShell(onRecreate: () -> Unit) {
     val queue = remember { QueueState() }
     val account = remember { AccountState() }
     val favorite = remember { FavoriteState() }
+    val search = remember { SearchState() }
+    val ranking = remember { RankingState() }
+    val tagFavorite = remember { TagFavoriteState() }
+    val history = remember { HistoryState() }
     val explorer = remember { ExplorerState() }
     val reader = remember { ReaderState() }
     val updateCenter = remember { UpdateCenter(context, scope) }
@@ -266,16 +270,24 @@ fun AppShell(onRecreate: () -> Unit) {
                             // 阅读器用本子名当标题：字号收小（默认 titleLarge 在窄屏上放不下长标题），
                             // 点一下看文件 / 本子资料
                             val name = reader.source?.name.orEmpty()
-                            if (current == AppRoute.Reader && name.isNotEmpty()) {
-                                Text(
+                            when {
+                                current == AppRoute.Reader && name.isNotEmpty() -> Text(
                                     text = name,
                                     style = MaterialTheme.typography.titleMedium,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                     modifier = Modifier.clickable { openReaderMeta() },
                                 )
-                            } else {
-                                Text(stringResource(current.titleRes))
+
+                                // 搜索页标题显示当前关键词，一眼看清搜的是什么
+                                current == AppRoute.Search && search.keyword.isNotEmpty() -> Text(
+                                    text = search.keyword,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+
+                                else -> Text(stringResource(current.titleRes))
                             }
                         },
                         navigationIcon = {
@@ -363,6 +375,11 @@ fun AppShell(onRecreate: () -> Unit) {
                             albumId = id
                             stack = stack + AppRoute.Album
                         },
+                        // 主页只做榜单入口（保持 SFW），进入榜单页才拉取内容
+                        onOpenRanking = { kind ->
+                            ranking.open(kind)
+                            stack = stack + AppRoute.Ranking
+                        },
                         modifier = Modifier.fillMaxSize(),
                     )
 
@@ -378,6 +395,11 @@ fun AppShell(onRecreate: () -> Unit) {
                             if (!ids.contains(id)) {
                                 download.idsText = (ids + id).joinToString(", ")
                             }
+                        },
+                        // 标签 / 作者 / 角色跳「对应类型」的搜索（不用「全部」）
+                        onOpenTypedSearch = { mode, keyword ->
+                            search.open(mode, keyword)
+                            stack = stack + AppRoute.Search
                         },
                         onOpenReader = { openReader(it) },
                         modifier = Modifier.fillMaxSize(),
@@ -402,11 +424,61 @@ fun AppShell(onRecreate: () -> Unit) {
                             stack = stack + AppRoute.Album
                         },
                         onOpenFavorites = { stack = stack + AppRoute.Favorite },
+                        onOpenTagFavorites = {
+                            tagFavorite.reset()
+                            stack = stack + AppRoute.TagFavorite
+                        },
+                        onOpenHistory = {
+                            history.reset()
+                            stack = stack + AppRoute.History
+                        },
+                        // 账号页预览的 tag 只能跳搜索：用「全部」搜索，返回回到账号页
+                        onOpenTagSearch = { tag ->
+                            search.open("all", tag)
+                            stack = stack + AppRoute.Search
+                        },
                         modifier = Modifier.fillMaxSize(),
                     )
 
                     AppRoute.Favorite -> FavoriteScreen(
                         state = favorite,
+                        onOpenAlbum = { id ->
+                            albumId = id
+                            stack = stack + AppRoute.Album
+                        },
+                        modifier = Modifier.fillMaxSize(),
+                    )
+
+                    AppRoute.Search -> SearchScreen(
+                        state = search,
+                        onOpenAlbum = { id ->
+                            albumId = id
+                            stack = stack + AppRoute.Album
+                        },
+                        modifier = Modifier.fillMaxSize(),
+                    )
+
+                    AppRoute.Ranking -> RankingScreen(
+                        state = ranking,
+                        onOpenAlbum = { id ->
+                            albumId = id
+                            stack = stack + AppRoute.Album
+                        },
+                        modifier = Modifier.fillMaxSize(),
+                    )
+
+                    AppRoute.TagFavorite -> TagFavoriteScreen(
+                        state = tagFavorite,
+                        // tag 收藏页跳搜索用「全部」搜索
+                        onJumpSearch = { tag ->
+                            search.open("all", tag)
+                            stack = stack + AppRoute.Search
+                        },
+                        modifier = Modifier.fillMaxSize(),
+                    )
+
+                    AppRoute.History -> HistoryScreen(
+                        state = history,
                         onOpenAlbum = { id ->
                             albumId = id
                             stack = stack + AppRoute.Album
@@ -456,11 +528,30 @@ fun AppShell(onRecreate: () -> Unit) {
                             explore.reset()
                             account.preview = null
                             account.previewError = null
+                            account.tagPreview = null
+                            account.tagPreviewError = null
+                            account.historyPreview = null
+                            account.historyPreviewError = null
+                            account.previewSeq += 1
                             favorite.reset()
+                            tagFavorite.reset()
+                            history.reset()
                         },
                         // 传函数而不是布尔值：外壳层不读队列状态，避免跟着队列快照重组
                         isDownloadActive = { queue.hasActive() },
                         onCheckUpdate = { channel -> updateCenter.check(channel, manual = true) },
+                        onLocalDataImported = {
+                            // 本地收藏数据被整体覆盖：账号页三个预览与完整页作废重取
+                            account.preview = null
+                            account.previewError = null
+                            account.tagPreview = null
+                            account.tagPreviewError = null
+                            account.historyPreview = null
+                            account.historyPreviewError = null
+                            account.previewSeq += 1
+                            tagFavorite.reset()
+                            history.reset()
+                        },
                     )
 
                     // 以下页面在第 4 步的后续切片里逐页落地
