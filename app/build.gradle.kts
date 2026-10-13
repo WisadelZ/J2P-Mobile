@@ -16,8 +16,8 @@ android {
         applicationId = "com.j2pmobile.android"
         minSdk = 24          // Chaquopy 17.0 requires minSdk >= 24
         targetSdk = 36
-        versionCode = 2050000
-        versionName = "v2.5.0"
+        versionCode = 2060000
+        versionName = "v2.6.0"
 
         // Chaquopy 强制要求 ndk.abiFilters 写在 defaultConfig（写进 buildType 会直接报错），
         // 这里声明「支持的 ABI 全集」；最终产出哪几个包由下面的 splits 决定。

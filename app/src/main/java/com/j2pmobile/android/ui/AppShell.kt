@@ -113,6 +113,7 @@ fun AppShell(onRecreate: () -> Unit) {
     val download = remember { DownloadState() }
     val queue = remember { QueueState() }
     val account = remember { AccountState() }
+    val sync = remember { SyncState() }
     val favorite = remember { FavoriteState() }
     val search = remember { SearchState() }
     val ranking = remember { RankingState() }
@@ -302,6 +303,13 @@ fun AppShell(onRecreate: () -> Unit) {
                         },
                         actions = {
                             if (current == AppRoute.Account) {
+                                // 顶栏右侧：同步（云朵，不带文字无底框）在设置齿轮左侧
+                                IconButton(onClick = { stack = stack + AppRoute.Sync }) {
+                                    Icon(
+                                        painter = painterResource(R.drawable.ic_cloud),
+                                        contentDescription = stringResource(R.string.sync_title),
+                                    )
+                                }
                                 IconButton(onClick = { stack = stack + AppRoute.Settings }) {
                                     Icon(
                                         painter = painterResource(R.drawable.ic_settings),
@@ -552,6 +560,11 @@ fun AppShell(onRecreate: () -> Unit) {
                             tagFavorite.reset()
                             history.reset()
                         },
+                    )
+
+                    AppRoute.Sync -> SyncScreen(
+                        state = sync,
+                        modifier = Modifier.fillMaxSize(),
                     )
 
                     // 以下页面在第 4 步的后续切片里逐页落地

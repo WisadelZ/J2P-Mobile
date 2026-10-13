@@ -34,6 +34,7 @@ enum class AppRoute(@StringRes val titleRes: Int) {
     Tasks(R.string.btn_tasks),
     Favorite(R.string.favorite_title),
     Settings(R.string.settings_title),
+    Sync(R.string.sync_title),
     Reader(R.string.btn_browse),
     ReaderSettings(R.string.reader_settings_title),
     Bookmarks(R.string.reader_bookmarks_title),

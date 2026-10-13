@@ -393,3 +393,217 @@ def import_text(text):
     _ensure_default_folder(out)
     _save(out)
     return True
+
+
+# ---------------------------------------------------------------------------
+# 云同步（与网站账号配合）
+#
+# 云端结构与本地结构的差异：
+#   · 收藏夹：本地用自增 id，云端以**名字**为键（名字本地唯一，跨设备也稳定）；
+#   · 收藏标签：本地用 folder_id，云端用 folder_name；
+#   · 浏览记录：本地 id 即本子 ID，云端同样用本子 ID 作键。
+# 两边都用「秒级时间戳」表示时间，合并时取更新的那条。
+# ---------------------------------------------------------------------------
+
+def _read_state():
+    """返回 ``(data, corrupted)``。
+
+    · 文件不存在 → 空结构（含默认收藏夹），``corrupted=False``；
+    · 文件存在但解不开（换机 / 换安装 / 内容损坏）→ ``corrupted=True``，
+      此时调用方应禁止一切本地操作，避免把损坏状态当成「空数据」覆盖掉。
+    """
+    path = collection_path()
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except OSError:
+        data = _empty()
+        _ensure_default_folder(data)
+        return data, False
+    payload = secure.open_payload(raw)
+    if payload is None:
+        return _empty(), True
+    data = _normalize(payload)
+    _ensure_default_folder(data)
+    return data, False
+
+
+def _counts(data):
+    return {"folders": len(data["tag_folders"]),
+            "tags": len(data["tags"]),
+            "history": len(data["history"])}
+
+
+def _canon_local(data):
+    """本地数据的规范化指纹（判断一次操作后是否真的发生变化）。"""
+    return (
+        tuple(sorted((f["name"], bool(f.get("default"))) for f in data["tag_folders"])),
+        tuple(sorted((t["name"], t["folder_id"], t["updated"]) for t in data["tags"])),
+        tuple(sorted((h["id"], h["name"], h["author"], h["created"]) for h in data["history"])),
+    )
+
+
+def _to_cloud(data):
+    """本地结构 → 云端结构（收藏夹 id 换成名字）。"""
+    names = {f["id"]: f["name"] for f in data["tag_folders"]}
+    default_name = next((f["name"] for f in data["tag_folders"] if f.get("default")),
+                        DEFAULT_FOLDER_NAME)
+    return {
+        "folders": [{"name": f["name"], "is_default": bool(f.get("default")),
+                     "created": int(f["created"] or 0), "updated": int(f["created"] or 0)}
+                    for f in data["tag_folders"]],
+        "tags": [{"name": t["name"],
+                  "folder_name": names.get(t["folder_id"], default_name),
+                  "created": int(t["created"] or 0), "updated": int(t["updated"] or 0)}
+                 for t in data["tags"]],
+        "history": [{"album_id": h["id"], "name": h["name"], "author": h["author"],
+                     "created": int(h["created"] or 0)} for h in data["history"]],
+    }
+
+
+def _normalize_cloud(cloud):
+    """把云端返回的数据整理成规范结构（逐字段丢弃非法行、按时间倒序、截断上限）。"""
+    cloud = cloud if isinstance(cloud, dict) else {}
+
+    folders = []
+    seen_folders = set()
+    for row in cloud.get("folders") or []:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "").strip()
+        if not name or name in seen_folders:
+            continue
+        seen_folders.add(name)
+        folders.append({"name": name, "is_default": bool(row.get("is_default")),
+                        "created": int(row.get("created") or 0),
+                        "updated": int(row.get("updated") or 0)})
+
+    tags = []
+    seen_tags = set()
+    for row in cloud.get("tags") or []:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "").strip()
+        if not name or name in seen_tags:
+            continue
+        seen_tags.add(name)
+        tags.append({"name": name, "folder_name": str(row.get("folder_name") or "").strip(),
+                     "created": int(row.get("created") or 0),
+                     "updated": int(row.get("updated") or 0)})
+
+    history = []
+    seen_albums = set()
+    for row in cloud.get("history") or []:
+        if not isinstance(row, dict):
+            continue
+        album_id = str(row.get("album_id") or "").strip()
+        if not album_id or album_id in seen_albums:
+            continue
+        seen_albums.add(album_id)
+        history.append({"album_id": album_id, "name": str(row.get("name") or ""),
+                        "author": str(row.get("author") or ""),
+                        "created": int(row.get("created") or 0)})
+
+    tags.sort(key=lambda t: t["updated"], reverse=True)
+    history.sort(key=lambda h: h["created"], reverse=True)
+    return {"folders": folders, "tags": tags[:TAG_LIMIT], "history": history[:HISTORY_LIMIT]}
+
+
+def _merge_cloud(base, incoming):
+    """把 incoming 合并进 base（同键取时间更新的那条；收藏夹取已存在的）。"""
+    folders = {f["name"]: f for f in base["folders"]}
+    for f in incoming["folders"]:
+        folders.setdefault(f["name"], f)
+    tags = {t["name"]: t for t in base["tags"]}
+    for t in incoming["tags"]:
+        cur = tags.get(t["name"])
+        if cur is None or t["updated"] > cur["updated"]:
+            tags[t["name"]] = t
+    history = {h["album_id"]: h for h in base["history"]}
+    for h in incoming["history"]:
+        cur = history.get(h["album_id"])
+        if cur is None or h["created"] > cur["created"]:
+            history[h["album_id"]] = h
+    return {"folders": list(folders.values()), "tags": list(tags.values()),
+            "history": list(history.values())}
+
+
+def _cloud_to_local(cloud):
+    """云端结构 → 本地结构（收藏夹名 → 本地自增 id），并补齐默认收藏夹。"""
+    names = []
+    default_name = None
+    for f in cloud["folders"]:
+        name = f["name"]
+        if name in names:
+            continue
+        names.append(name)
+        if f.get("is_default") and default_name is None:
+            default_name = name
+    if not names:
+        names = [DEFAULT_FOLDER_NAME]
+    if default_name is None:
+        default_name = names[0]
+    id_of = {name: str(index + 1) for index, name in enumerate(names)}
+
+    out = _empty()
+    out["tag_folders"] = [{"id": id_of[name], "name": name,
+                           "default": (name == default_name), "created": _now()}
+                          for name in names]
+    out["tags"] = []
+    for t in cloud["tags"]:
+        folder_id = id_of.get(t["folder_name"], id_of[default_name])
+        out["tags"].append({"name": t["name"], "folder_id": folder_id,
+                            "created": t["created"], "updated": t["updated"]})
+    out["history"] = [{"id": h["album_id"], "name": h["name"], "author": h["author"],
+                       "created": h["created"]} for h in cloud["history"]]
+    out["tags"].sort(key=lambda t: t["updated"], reverse=True)
+    out["history"].sort(key=lambda h: h["created"], reverse=True)
+    return _normalize(out)
+
+
+@_serialized
+def snapshot():
+    """同步用：返回本地全部数据（云端结构）+ 数量；本地损坏时 ``corrupted=True``。"""
+    data, corrupted = _read_state()
+    if corrupted:
+        return {"corrupted": True, "folders": [], "tags": [], "history": [],
+                "counts": {"folders": 0, "tags": 0, "history": 0}}
+    cloud = _to_cloud(data)
+    return {"corrupted": False, "folders": cloud["folders"], "tags": cloud["tags"],
+            "history": cloud["history"], "counts": _counts(data)}
+
+
+@_serialized
+def apply_cloud(mode, cloud):
+    """把云端数据合并 / 覆盖到本地。
+
+    ``mode`` 为 ``"merge"``（合并，同键取更新的）或 ``"overwrite"``（整体覆盖）。
+    返回 ``{"changed": bool, "counts": {...}}``；本地损坏时抛异常（禁止本地操作）。
+    """
+    data, corrupted = _read_state()
+    if corrupted:
+        raise ValueError("本地数据已损坏，已禁止本地操作")
+    incoming = _normalize_cloud(cloud)
+    before = _canon_local(data)
+    if str(mode or "").strip().lower() == "overwrite":
+        merged = incoming
+    else:
+        merged = _merge_cloud(_to_cloud(data), incoming)
+    out = _cloud_to_local(merged)
+    _save(out)
+    return {"changed": before != _canon_local(out), "counts": _counts(out)}
+
+
+@_serialized
+def clear_local():
+    """清除本地的浏览记录与标签收藏（收藏夹一并重置为默认收藏夹）。"""
+    data, corrupted = _read_state()
+    if corrupted:
+        raise ValueError("本地数据已损坏，已禁止本地操作")
+    before = _canon_local(data)
+    cleared = _counts(data)
+    out = _empty()
+    _ensure_default_folder(out)
+    _save(out)
+    return {"changed": before != _canon_local(out), "cleared": cleared,
+            "counts": _counts(out)}

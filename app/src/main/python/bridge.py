@@ -2033,3 +2033,84 @@ def queue_shutdown():
         return _fail(exc)
 
 
+# ---------------------------------------------------------------------------
+# 云同步（移动端「同步」页）
+#
+# 本地数据仍在 core.collection 的加密文件里；这里只提供三件事：
+#   1. 导出本地快照（含「是否损坏」标记，供界面禁用本地操作）；
+#   2. 把云端数据合并 / 覆盖到本地；
+#   3. 清除本地数据。
+# 同步账号（网站账号）的登录态单独加密存于 config/sync.dat，与 jmcomic 账号无关。
+# ---------------------------------------------------------------------------
+
+_SYNC_SESSION_FILENAME = "sync.dat"
+
+
+def _sync_session_path():
+    return os.path.join(config.config_dir(), _SYNC_SESSION_FILENAME)
+
+
+def sync_local_snapshot():
+    """本地应用数据快照（云端结构）+ 数量 + 是否损坏。"""
+    try:
+        from core import collection
+        return _ok(**collection.snapshot())
+    except Exception as exc:
+        return _fail(exc)
+
+
+def sync_apply_cloud(mode, cloud_json):
+    """把云端数据合并 / 覆盖到本地（mode: merge / overwrite）。"""
+    try:
+        from core import collection
+        cloud = json.loads(cloud_json) if cloud_json else {}
+        return _ok(**collection.apply_cloud(str(mode or "merge"), cloud))
+    except Exception as exc:
+        return _fail(exc)
+
+
+def sync_clear_local():
+    """清除本地的浏览记录与标签收藏。"""
+    try:
+        from core import collection
+        return _ok(**collection.clear_local())
+    except Exception as exc:
+        return _fail(exc)
+
+
+def sync_session_load():
+    """读取同步账号（网站账号）的登录态；未登录时 ``logged_in=False``。"""
+    try:
+        from core import account as secure
+        data = secure.read_secure(_sync_session_path()) or {}
+        if not isinstance(data, dict):
+            data = {}
+        token = str(data.get("token") or "")
+        return _ok(logged_in=bool(token), token=token, user=data.get("user") or None)
+    except Exception as exc:
+        return _fail(exc)
+
+
+def sync_session_save(token, user_json):
+    """保存同步账号的登录态（token + 用户资料，加密落盘）。"""
+    try:
+        from core import account as secure
+        user = json.loads(user_json) if user_json else None
+        secure.write_secure(_sync_session_path(), {"token": str(token or ""), "user": user})
+        return _ok()
+    except Exception as exc:
+        return _fail(exc)
+
+
+def sync_session_clear():
+    """清除同步账号的登录态（退出登录）。"""
+    try:
+        try:
+            os.remove(_sync_session_path())
+        except OSError:
+            pass
+        return _ok()
+    except Exception as exc:
+        return _fail(exc)
+
+

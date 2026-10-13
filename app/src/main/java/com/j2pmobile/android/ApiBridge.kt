@@ -1315,6 +1315,122 @@ object ApiBridge {
         }
         ApiResult.Ok(Unit)
     }
+
+    // ------------------------------------------------- 云同步（本地侧）
+
+    /** 本地应用数据快照（含「是否损坏」标记，供界面禁用本地操作）。 */
+    suspend fun syncLocalSnapshot(): ApiResult<SyncLocalSnapshot> = withContext(Dispatchers.IO) {
+        val result = PythonBridge.call("sync_local_snapshot")
+        if (!result.optBoolean("ok")) {
+            return@withContext ApiResult.Err(result.optString("error").ifEmpty { "unknown error" })
+        }
+        ApiResult.Ok(
+            SyncLocalSnapshot(
+                corrupted = result.optBoolean("corrupted"),
+                folders = result.optJSONArray("folders") ?: JSONArray(),
+                tags = result.optJSONArray("tags") ?: JSONArray(),
+                history = result.optJSONArray("history") ?: JSONArray(),
+                counts = result.optJSONObject("counts").toSyncCounts(),
+            )
+        )
+    }
+
+    /** 把云端数据合并 / 覆盖到本地（mode: merge / overwrite）。 */
+    suspend fun syncApplyCloud(mode: String, cloudJson: String): ApiResult<SyncApplyResult> =
+        withContext(Dispatchers.IO) {
+            val result = PythonBridge.call("sync_apply_cloud", mode, cloudJson)
+            if (!result.optBoolean("ok")) {
+                return@withContext ApiResult.Err(result.optString("error").ifEmpty { "unknown error" })
+            }
+            ApiResult.Ok(
+                SyncApplyResult(
+                    changed = result.optBoolean("changed"),
+                    counts = result.optJSONObject("counts").toSyncCounts(),
+                )
+            )
+        }
+
+    /** 清除本地的浏览记录与标签收藏。 */
+    suspend fun syncClearLocal(): ApiResult<SyncClearLocalResult> = withContext(Dispatchers.IO) {
+        val result = PythonBridge.call("sync_clear_local")
+        if (!result.optBoolean("ok")) {
+            return@withContext ApiResult.Err(result.optString("error").ifEmpty { "unknown error" })
+        }
+        ApiResult.Ok(
+            SyncClearLocalResult(
+                changed = result.optBoolean("changed"),
+                cleared = result.optJSONObject("cleared").toSyncCounts(),
+                counts = result.optJSONObject("counts").toSyncCounts(),
+            )
+        )
+    }
+
+    /** 读取同步账号（网站账号）登录态。 */
+    suspend fun syncSessionLoad(): ApiResult<SyncSession> = withContext(Dispatchers.IO) {
+        val result = PythonBridge.call("sync_session_load")
+        if (!result.optBoolean("ok")) {
+            return@withContext ApiResult.Err(result.optString("error").ifEmpty { "unknown error" })
+        }
+        ApiResult.Ok(
+            SyncSession(
+                loggedIn = result.optBoolean("logged_in"),
+                token = result.optString("token"),
+                user = result.optJSONObject("user")?.toSyncUser(),
+            )
+        )
+    }
+
+    /** 保存同步账号登录态（加密落盘）。 */
+    suspend fun syncSessionSave(token: String, userJson: String): ApiResult<Unit> =
+        withContext(Dispatchers.IO) {
+            val result = PythonBridge.call("sync_session_save", token, userJson)
+            if (!result.optBoolean("ok")) {
+                return@withContext ApiResult.Err(result.optString("error").ifEmpty { "unknown error" })
+            }
+            ApiResult.Ok(Unit)
+        }
+
+    /** 清除同步账号登录态（退出登录）。 */
+    suspend fun syncSessionClear(): ApiResult<Unit> = withContext(Dispatchers.IO) {
+        val result = PythonBridge.call("sync_session_clear")
+        if (!result.optBoolean("ok")) {
+            return@withContext ApiResult.Err(result.optString("error").ifEmpty { "unknown error" })
+        }
+        ApiResult.Ok(Unit)
+    }
+}
+
+/** 本地应用数据快照（同步用）。 */
+class SyncLocalSnapshot(
+    val corrupted: Boolean,
+    val folders: JSONArray,
+    val tags: JSONArray,
+    val history: JSONArray,
+    val counts: SyncCounts,
+)
+
+/** 云端 → 本地写入的结果。 */
+data class SyncApplyResult(val changed: Boolean, val counts: SyncCounts)
+
+/** 清除本地的结果。 */
+data class SyncClearLocalResult(val changed: Boolean, val cleared: SyncCounts, val counts: SyncCounts)
+
+/** 同步账号登录态。 */
+data class SyncSession(val loggedIn: Boolean, val token: String, val user: SyncUser?)
+
+private fun JSONObject?.toSyncCounts(): SyncCounts {
+    val c = this ?: JSONObject()
+    return SyncCounts(c.optInt("folders"), c.optInt("tags"), c.optInt("history"))
+}
+
+private fun JSONObject.toSyncUser(): SyncUser {
+    val name = optString("username")
+    return SyncUser(
+        id = optInt("id"),
+        username = name,
+        nickname = optString("nickname").ifEmpty { name },
+        email = optString("email"),
+    )
 }
 
 private fun JSONObject.toReaderSource(): ReaderSource = ReaderSource(
