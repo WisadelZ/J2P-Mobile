@@ -25,7 +25,7 @@
 
     <!-- 设置底部：关于（由原帮助页并入） -->
     <string name="about_title">About</string>
-    <string name="about_version_value">v2.6.0</string>
+    <string name="about_version_value">v2.6.1</string>
     <string name="about_author_value">WisadelZ</string>
     <string name="about_project_value">https://github.com/WisadelZ/J2P-Mobile</string>
     <string name="about_issues_value">https://github.com/WisadelZ/J2P-Mobile/issues</string>
@@ -496,6 +496,7 @@
     <string name="comment_empty">No comments yet</string>
     <string name="comment_load_failed">Failed to load comments: %1$s</string>
     <string name="comment_load_more">Load more</string>
+    <string name="comment_post_timeout">Timed out; check your network and try again</string>
     <string name="comment_likes">%1$d found this helpful</string>
     <string name="comment_spoiler_content">Contains spoilers, tap to reveal</string>
     <string name="btn_post_comment">Post</string>

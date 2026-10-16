@@ -87,21 +87,42 @@ import com.j2pmobile.android.R
 import com.j2pmobile.android.ReaderSource
 import com.j2pmobile.android.TagFolder
 import com.j2pmobile.android.ui.components.CoverImage
+import com.j2pmobile.android.ui.components.FavoriteFolderDialog
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 
 /** 左侧封面尺寸（3:4，与站点 `_3x4` 封面一致）。 */
 private val COVER_WIDTH = 110.dp
 private val COVER_HEIGHT = 147.dp
 
-/** 预览缩略图的显示宽度、高度上限，以及解码时用的目标像素宽（够 3x 密度用）。 */
+/** 预览缩略图的显示宽度、高度上限，以及解码时用的目标像素宽。 */
 private val THUMB_WIDTH = 120.dp
 private val THUMB_MAX_HEIGHT = 200.dp
-private const val THUMB_TARGET_PX = 400
+
+/**
+ * 缩略图解码的目标像素宽。
+ *
+ * 缩略图会随页面缓存**长期驻留**，所以这里按「够用就好」定：显示宽 120dp，在 3x 密度屏上
+ * 约 360px；取 320 会让 `inSampleSize` 落到 4（原图 1280 → 320），每张约 0.57 MB。
+ * 若取 400，采样只能到 2（640px，约 2.3 MB/张）—— 5 张就差出近 9 MB/本，而肉眼看不出差别。
+ * 调大它等于直接用内存换几乎看不出的锐度。
+ */
+private const val THUMB_TARGET_PX = 320
 
 /** 放大查看时的暗底（与桌面版 0.78 的黑底同义）。 */
 private val ZOOM_SCRIM = Color(0xCC000000)
+
+/**
+ * 发表评论的兜底时限（毫秒）。
+ *
+ * 评论走「网页端」实现：首次要解析网页域名再登录握手，链路上任何一步都可能卡住。
+ * Python 侧已给每个请求加了超时，这里再加一道界面侧的硬闸 —— 无论底下发生什么，
+ * 按钮都不会一直灰着不响应。
+ */
+private const val COMMENT_POST_TIMEOUT_MS = 90_000L
 
 /**
  * 本子详情页：大封面 + 本子信息 + 操作按钮 + 「前几页」预览。
@@ -121,6 +142,8 @@ private val ZOOM_SCRIM = Color(0xCC000000)
 @Composable
 fun AlbumScreen(
     albumId: String,
+    /** 页面级缓存（由外壳持有）：切走再回来时详情 / 预览缩略图 / 评论都不再重新联网。 */
+    cache: PageCache,
     queue: QueueState,
     saveDownloadConf: suspend () -> Unit,
     onAddToDownloadList: (String) -> Unit,
@@ -132,53 +155,63 @@ fun AlbumScreen(
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
 
-    var loading by remember { mutableStateOf(true) }
-    var detail by remember { mutableStateOf<AlbumDetail?>(null) }
-    var loadError by remember { mutableStateOf<String?>(null) }
-    var favorited by remember { mutableStateOf(false) }
-    var liked by remember { mutableStateOf(false) }
-    var likesText by remember { mutableStateOf("") }
-    var likeLoading by remember { mutableStateOf(false) }
-    var browseLoading by remember { mutableStateOf(false) }
+    // 【关键】缓存命中时**在第一帧就用缓存初始化状态**，而不是「先空一帧、再由 LaunchedEffect
+    // 异步填上」——后者切回详情页会闪一下「加载中 / 占位底框」，实测体验很差。
+    // 下面这些状态一律以 albumId 为键：换一本本子（同一处组合被复用）时整组重置，不会串数据。
+    val cachedDetail = remember(albumId) { cache.detail(albumId) }
+    val cachedPreview = remember(albumId) { cache.preview(albumId) }
+    val cachedComments = remember(albumId) { cache.comments(albumId) }
 
-    var metas by remember { mutableStateOf<List<PreviewPageMeta>>(emptyList()) }
-    var previewBytes by remember { mutableStateOf<List<ByteArray>>(emptyList()) }
-    var previewThumbs by remember { mutableStateOf<List<Bitmap?>>(emptyList()) }
-    var previewLoading by remember { mutableStateOf(true) }
-    var previewError by remember { mutableStateOf<String?>(null) }
+    var loading by remember(albumId) { mutableStateOf(cachedDetail == null) }
+    var detail by remember(albumId) { mutableStateOf(cachedDetail) }
+    var loadError by remember(albumId) { mutableStateOf<String?>(null) }
+    var favorited by remember(albumId) { mutableStateOf(cachedDetail?.favorited ?: false) }
+    var liked by remember(albumId) { mutableStateOf(cachedDetail?.liked ?: false) }
+    var likesText by remember(albumId) { mutableStateOf(cachedDetail?.likes.orEmpty()) }
+    var likeLoading by remember(albumId) { mutableStateOf(false) }
+    var browseLoading by remember(albumId) { mutableStateOf(false) }
+
+    var metas by remember(albumId) { mutableStateOf(cachedPreview?.metas ?: emptyList()) }
+    var previewBytes by remember(albumId) { mutableStateOf(cachedPreview?.bytes ?: emptyList()) }
+    var previewThumbs by remember(albumId) { mutableStateOf(cachedPreview?.thumbs ?: emptyList()) }
+    var previewLoading by remember(albumId) { mutableStateOf(cachedPreview == null) }
+    var previewError by remember(albumId) { mutableStateOf<String?>(null) }
     /** 「预览前五页」开关：关掉时详情页不拉预览、也不显示预览条。 */
     var previewEnabled by remember { mutableStateOf(true) }
 
     /** 放大查看的当前页索引；-1 表示未打开。 */
-    var zoomIndex by remember { mutableStateOf(-1) }
+    var zoomIndex by remember(albumId) { mutableStateOf(-1) }
 
-    var folderDialogOpen by remember { mutableStateOf(false) }
-    var folders by remember { mutableStateOf<List<FavoriteFolder>>(emptyList()) }
-    var foldersLoading by remember { mutableStateOf(false) }
-    var foldersError by remember { mutableStateOf<String?>(null) }
-    var selectedFolder by remember { mutableStateOf("0") }
+    var folderDialogOpen by remember(albumId) { mutableStateOf(false) }
+    var folders by remember(albumId) { mutableStateOf<List<FavoriteFolder>>(emptyList()) }
+    var foldersLoading by remember(albumId) { mutableStateOf(false) }
+    var foldersError by remember(albumId) { mutableStateOf<String?>(null) }
 
     // ---- tag 收藏（长按标签弹出：与「本子收藏」同款选收藏夹 / 新建收藏夹交互）
-    var collectTag by remember { mutableStateOf<String?>(null) }
-    var tagFolders by remember { mutableStateOf<List<TagFolder>>(emptyList()) }
-    var tagFolderLoading by remember { mutableStateOf(false) }
-    var tagFolderError by remember { mutableStateOf<String?>(null) }
-    var tagFolderSel by remember { mutableStateOf("") }
-    var newTagFolderName by remember { mutableStateOf("") }
+    var collectTag by remember(albumId) { mutableStateOf<String?>(null) }
+    var tagFolders by remember(albumId) { mutableStateOf<List<TagFolder>>(emptyList()) }
+    var tagFolderLoading by remember(albumId) { mutableStateOf(false) }
+    var tagFolderError by remember(albumId) { mutableStateOf<String?>(null) }
+    var tagFolderSel by remember(albumId) { mutableStateOf("") }
+    var newTagFolderName by remember(albumId) { mutableStateOf("") }
 
     // ---- 网站评论
-    var comments by remember { mutableStateOf<List<CommentItem>>(emptyList()) }
-    var commentPage by remember { mutableStateOf(1) }
-    var commentTotal by remember { mutableStateOf(0) }
-    var commentCount by remember { mutableStateOf(0) }
-    var commentsLoading by remember { mutableStateOf(false) }
-    var commentError by remember { mutableStateOf<String?>(null) }
-    var commentInput by remember { mutableStateOf("") }
-    var commentPosting by remember { mutableStateOf(false) }
+    var comments by remember(albumId) { mutableStateOf(cachedComments?.items ?: emptyList()) }
+    var commentPage by remember(albumId) { mutableStateOf(cachedComments?.page ?: 1) }
+    var commentTotal by remember(albumId) { mutableStateOf(cachedComments?.total ?: 0) }
+    var commentCount by remember(albumId) {
+        mutableStateOf(
+            cachedComments?.count?.takeIf { it > 0 } ?: cachedDetail?.commentCount ?: 0
+        )
+    }
+    var commentsLoading by remember(albumId) { mutableStateOf(false) }
+    var commentError by remember(albumId) { mutableStateOf<String?>(null) }
+    var commentInput by remember(albumId) { mutableStateOf("") }
+    var commentPosting by remember(albumId) { mutableStateOf(false) }
 
-    var statusRes by remember { mutableStateOf(R.string.status_ready) }
-    var statusArg by remember { mutableStateOf<String?>(null) }
-    var statusKind by remember { mutableStateOf(StatusKind.IDLE) }
+    var statusRes by remember(albumId) { mutableStateOf(R.string.status_ready) }
+    var statusArg by remember(albumId) { mutableStateOf<String?>(null) }
+    var statusKind by remember(albumId) { mutableStateOf(StatusKind.IDLE) }
 
     fun setStatus(res: Int, kind: StatusKind, arg: String? = null) {
         statusRes = res
@@ -186,27 +219,53 @@ fun AlbumScreen(
         statusKind = kind
     }
 
-    // 详情 + 预览：进页面各取一次
+    /** 把一份详情铺进界面状态（缓存命中与联网取回共用同一条路径）。 */
+    fun applyDetail(value: AlbumDetail) {
+        detail = value
+        favorited = value.favorited
+        liked = value.liked
+        likesText = value.likes
+        commentCount = value.commentCount
+    }
+
+    /** 详情状态被本地改动（点赞 / 收藏 / 评论数）后同步回缓存，返回详情页时不显示旧状态。 */
+    fun syncDetailCache() {
+        val current = detail ?: return
+        cache.putDetail(
+            albumId,
+            current.copy(
+                favorited = favorited,
+                liked = liked,
+                likes = likesText,
+                commentCount = commentCount,
+            ),
+        )
+    }
+
+    // 详情 + 预览：进页面各取一次；缓存命中时**首帧已经铺好了**，这里不再联网
     LaunchedEffect(albumId) {
-        loading = true
-        loadError = null
         // 一进详情页就记一条浏览历史（先只带 ID，标题 / 作者拿到后再补写一次）：
         // 取详情要联网，等它回来才记的话，用户会觉得「看了半天才计入」。
         ApiBridge.historyAdd(albumId)
-        when (val result = ApiBridge.albumDetail(albumId)) {
-            is ApiResult.Ok -> {
-                detail = result.value
-                favorited = result.value.favorited
-                liked = result.value.liked
-                likesText = result.value.likes
-                commentCount = result.value.commentCount
-                // 补全标题与作者（本地收藏文件；不按账号隔离）
-                ApiBridge.historyAdd(albumId, result.value.title, result.value.author)
-            }
 
-            is ApiResult.Err -> loadError = result.message
+        if (cachedDetail != null) {
+            // 命中缓存：状态已在首帧初始化，这里只补一条带标题的历史
+            ApiBridge.historyAdd(albumId, cachedDetail.title, cachedDetail.author)
+        } else {
+            loading = true
+            loadError = null
+            when (val result = ApiBridge.albumDetail(albumId)) {
+                is ApiResult.Ok -> {
+                    applyDetail(result.value)
+                    cache.putDetail(albumId, result.value)
+                    // 补全标题与作者（本地收藏文件；不按账号隔离）
+                    ApiBridge.historyAdd(albumId, result.value.title, result.value.author)
+                }
+
+                is ApiResult.Err -> loadError = result.message
+            }
+            loading = false
         }
-        loading = false
 
         // 「预览前五页」开关：关掉就整段跳过（详情已经加载好了）
         previewEnabled = ApiBridge.loadConfig()
@@ -216,6 +275,7 @@ fun AlbumScreen(
             previewLoading = false
             return@LaunchedEffect
         }
+        if (cachedPreview != null) return@LaunchedEffect   // 首帧已铺好，不必再取
 
         previewLoading = true
         previewError = null
@@ -245,6 +305,9 @@ fun AlbumScreen(
                         }
                     }
                 }
+                if (previewError == null && metas.isNotEmpty()) {
+                    cache.putPreview(albumId, AlbumPreview(metas, previewBytes, previewThumbs))
+                }
             }
 
             is ApiResult.Err -> previewError = result.message
@@ -252,9 +315,26 @@ fun AlbumScreen(
         previewLoading = false
     }
 
-    /** 加载评论：首页替换、后续页追加。 */
-    fun loadComments(page: Int, append: Boolean) {
+    /**
+     * 加载评论：首页替换、后续页追加。
+     *
+     * 首页默认**先查缓存**（切走再回来不重新联网）；[force] 为真时跳过缓存（发表评论后
+     * 必须拿到服务端最新的那一条，不能拿旧缓存糊弄）。
+     */
+    fun loadComments(page: Int, append: Boolean, force: Boolean = false) {
         if (commentsLoading) return
+        if (!append && !force) {
+            val cached = cache.comments(albumId)
+            if (cached != null) {
+                comments = cached.items
+                commentPage = cached.page
+                commentTotal = cached.total
+                if (cached.count > 0) commentCount = cached.count
+                commentError = null
+                commentsLoading = false
+                return
+            }
+        }
         commentsLoading = true
         commentError = null
         scope.launch {
@@ -264,6 +344,11 @@ fun AlbumScreen(
                     commentTotal = result.value.total
                     if (result.value.commentCount > 0) commentCount = result.value.commentCount
                     comments = if (append) comments + result.value.items else result.value.items
+                    cache.putComments(
+                        albumId,
+                        AlbumComments(comments, commentPage, commentTotal, commentCount),
+                    )
+                    syncDetailCache()
                 }
 
                 is ApiResult.Err -> commentError = result.message
@@ -284,6 +369,7 @@ fun AlbumScreen(
                 is ApiResult.Ok -> {
                     liked = result.value.liked
                     if (result.value.likes.isNotEmpty()) likesText = result.value.likes
+                    syncDetailCache()
                     setStatus(
                         if (result.value.liked) R.string.status_like_ok else R.string.status_like_removed,
                         StatusKind.OK,
@@ -324,22 +410,37 @@ fun AlbumScreen(
         if (content.isEmpty() || commentPosting) return
         commentPosting = true
         scope.launch {
-            when (val result = ApiBridge.albumCommentPost(albumId, content)) {
-                is ApiResult.Ok -> {
-                    if (result.value.success) {
-                        commentInput = ""
-                        setStatus(R.string.status_comment_posted, StatusKind.OK)
-                        loadComments(1, append = false)
-                    } else {
-                        setStatus(R.string.status_comment_failed, StatusKind.ERR, result.value.msg)
-                    }
+            try {
+                // 兜底时限：评论要现建「网页端」会话（拉网页域名 + 登录握手），链路上任何一步
+                // 卡住都不能让按钮一直灰着。超时就把按钮恢复可点并明确提示，绝不静默。
+                val result = withTimeout(COMMENT_POST_TIMEOUT_MS) {
+                    ApiBridge.albumCommentPost(albumId, content)
                 }
+                when (result) {
+                    is ApiResult.Ok -> {
+                        if (result.value.success) {
+                            commentInput = ""
+                            setStatus(R.string.status_comment_posted, StatusKind.OK)
+                            // 发表后必须拿服务端最新列表：跳过评论缓存，避免显示旧的那一页
+                            loadComments(1, append = false, force = true)
+                        } else {
+                            setStatus(R.string.status_comment_failed, StatusKind.ERR, result.value.msg)
+                        }
+                    }
 
-                is ApiResult.Err -> setStatus(
-                    R.string.status_comment_failed, StatusKind.ERR, result.message
+                    is ApiResult.Err -> setStatus(
+                        R.string.status_comment_failed, StatusKind.ERR, result.message
+                    )
+                }
+            } catch (_: TimeoutCancellationException) {
+                setStatus(
+                    R.string.status_comment_failed,
+                    StatusKind.ERR,
+                    context.getString(R.string.comment_post_timeout),
                 )
+            } finally {
+                commentPosting = false
             }
-            commentPosting = false
         }
     }
 
@@ -352,7 +453,6 @@ fun AlbumScreen(
         foldersLoading = true
         foldersError = null
         folders = emptyList()
-        selectedFolder = "0"
         scope.launch {
             when (val result = ApiBridge.favoriteFolders()) {
                 is ApiResult.Ok -> folders = result.value
@@ -373,6 +473,7 @@ fun AlbumScreen(
             when (val result = ApiBridge.favoriteRemove(albumId)) {
                 is ApiResult.Ok -> {
                     favorited = false
+                    syncDetailCache()
                     setStatus(R.string.status_favorite_removed, StatusKind.OK)
                 }
 
@@ -625,79 +726,32 @@ fun AlbumScreen(
         }
     }
 
-    // ---------------- 收藏夹弹窗 ----------------
+    // ---------------- 收藏夹弹窗（与阅读器共用同一组件） ----------------
     if (folderDialogOpen) {
-        val allFolders = listOf(
-            FavoriteFolder("0", stringResource(R.string.favorite_folder_all))
-        ) + folders
-        AlertDialog(
-            onDismissRequest = { folderDialogOpen = false },
-            title = { Text(stringResource(R.string.favorite_choose_title)) },
-            text = {
-                when {
-                    foldersLoading -> Text(
-                        text = stringResource(R.string.favorite_choose_loading),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-
-                    foldersError != null -> Text(
-                        text = stringResource(R.string.favorite_choose_failed, foldersError!!),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
-                    )
-
-                    else -> Column(
-                        modifier = Modifier.verticalScroll(rememberScrollState())
-                    ) {
-                        allFolders.forEach { folder ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { selectedFolder = folder.id }
-                                    .padding(vertical = 2.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                RadioButton(
-                                    selected = selectedFolder == folder.id,
-                                    onClick = { selectedFolder = folder.id },
-                                )
-                                Text(folder.name, style = MaterialTheme.typography.bodyMedium)
-                            }
+        FavoriteFolderDialog(
+            folders = folders,
+            loading = foldersLoading,
+            error = foldersError,
+            onConfirm = { folderId ->
+                folderDialogOpen = false
+                scope.launch {
+                    setStatus(R.string.status_favorite_adding, StatusKind.IDLE)
+                    when (val result = ApiBridge.favoriteAdd(albumId, folderId)) {
+                        is ApiResult.Ok -> {
+                            favorited = true
+                            syncDetailCache()
+                            setStatus(R.string.status_favorite_added, StatusKind.OK)
                         }
+
+                        is ApiResult.Err -> setStatus(
+                            R.string.status_favorite_add_failed,
+                            StatusKind.ERR,
+                            result.message,
+                        )
                     }
                 }
             },
-            confirmButton = {
-                TextButton(
-                    enabled = !foldersLoading && foldersError == null,
-                    onClick = {
-                        folderDialogOpen = false
-                        scope.launch {
-                            setStatus(R.string.status_favorite_adding, StatusKind.IDLE)
-                            when (val result = ApiBridge.favoriteAdd(albumId, selectedFolder)) {
-                                is ApiResult.Ok -> {
-                                    favorited = true
-                                    setStatus(R.string.status_favorite_added, StatusKind.OK)
-                                }
-
-                                is ApiResult.Err -> setStatus(
-                                    R.string.status_favorite_add_failed,
-                                    StatusKind.ERR,
-                                    result.message,
-                                )
-                            }
-                        }
-                    },
-                ) {
-                    Text(stringResource(R.string.btn_confirm))
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { folderDialogOpen = false }) {
-                    Text(stringResource(R.string.btn_cancel))
-                }
-            },
+            onDismiss = { folderDialogOpen = false },
         )
     }
 

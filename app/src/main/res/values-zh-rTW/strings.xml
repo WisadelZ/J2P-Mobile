@@ -23,7 +23,7 @@
 
     <!-- 設定底部：關於（由原說明頁併入） -->
     <string name="about_title">關於</string>
-    <string name="about_version_value">v2.6.0</string>
+    <string name="about_version_value">v2.6.1</string>
     <string name="about_author_value">WisadelZ</string>
     <string name="about_project_value">https://github.com/WisadelZ/J2P-Mobile</string>
     <string name="about_issues_value">https://github.com/WisadelZ/J2P-Mobile/issues</string>
@@ -494,6 +494,7 @@
     <string name="comment_empty">還沒有評論</string>
     <string name="comment_load_failed">載入評論失敗：%1$s</string>
     <string name="comment_load_more">載入更多</string>
+    <string name="comment_post_timeout">等待逾時，請檢查網路後重試</string>
     <string name="comment_likes">%1$d 人覺得有用</string>
     <string name="comment_spoiler_content">含劇透，點擊查看</string>
     <string name="btn_post_comment">發佈</string>

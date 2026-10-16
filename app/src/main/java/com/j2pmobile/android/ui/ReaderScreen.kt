@@ -141,12 +141,16 @@ import com.j2pmobile.android.ApiBridge
 import com.j2pmobile.android.ApiResult
 import com.j2pmobile.android.BookmarkItem
 import com.j2pmobile.android.ChapterItem
+import com.j2pmobile.android.FavoriteFolder
 import com.j2pmobile.android.ReaderSource
 import com.j2pmobile.android.R
+import com.j2pmobile.android.ui.components.FavoriteFolderDialog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -168,6 +172,19 @@ import kotlin.math.roundToInt
  */
 private const val MAX_CACHED_PAGES = 8
 
+/**
+ * 原始图片字节（未解码）的缓存上限：**按页数**与**按字节**双上限，先到先削。
+ *
+ * 为什么要单独缓存原始字节：解码后的位图一页约 9 MB，不可能留上百页；而原始字节一页只有
+ * 几百 KB，留 100~200 页完全可行。翻页时先看这里有没有字节，命中就直接本地解码，
+ * **不再联网 / 读盘** —— 这是「快速翻过几十页再翻回去不用重新加载」的关键。
+ *
+ * 200 页 / 48 MB 是「省流量」与「不被缓存拖累」之间的折中：按页数覆盖多章漫画的连续阅读，
+ * 按字节给低分辨率页留出更多余量、给高分辨率页提前刹车。嫌占内存可下调这两个值。
+ */
+private const val MAX_CACHED_RAW_PAGES = 200
+private const val MAX_CACHED_RAW_BYTES = 48 * 1024 * 1024
+
 /** 量不到页面尺寸时的兜底宽高比（A4 纵向）。 */
 private const val DEFAULT_ASPECT = 0.707f
 
@@ -178,7 +195,7 @@ private const val DEFAULT_ASPECT = 0.707f
  * 又不会让 6 张 9 MB 的位图同时压在内存里（不走配置里的 `thread_image`：那是下载
  * 落盘的并发，量级与这里不同）。
  */
-private const val READER_CONCURRENCY = 6
+private const val READER_CONCURRENCY = 8
 
 /** 翻页后**向前**（下一页方向）预取的页数：保证连续下滑时下面几屏已经就绪。 */
 private const val PREFETCH_AHEAD = 3
@@ -188,6 +205,28 @@ private const val PREFETCH_BEHIND = 2
 
 /** 首次进入一次铺够的页数（6~10 张）：避免逐张加载时一屏一屏的空白感。 */
 private const val INITIAL_PREFETCH = 8
+
+/**
+ * 「空闲超额预取」的**硬上限**：页面静止后最多往后连续取到这么多页。
+ *
+ * 竖式（连续阅读）取 24：一屏约 1~1.5 页，24 页足够覆盖「一口气往下滑很久」的节奏；
+ * 同时远小于原始字节缓存（200 页 / 48 MB），不会把刚看过的页挤出去。
+ *
+ * 横式（单页翻页）只取 5：翻一页才看一页，再往后下就是纯浪费流量 —— 这也是它与竖式
+ * 分开取值的唯一原因。
+ */
+private const val MAX_PREFETCH_AHEAD_VERTICAL = 24
+private const val MAX_PREFETCH_AHEAD_HORIZONTAL = 5
+
+/** 空闲超额预取的触发静置时长（毫秒）：这段时间内又翻页就重新计时。 */
+private const val PREFETCH_IDLE_DELAY_MS = 600L
+
+/** 空闲超额预取的并发：正常 2；判定为弱网时降到 1（此时多路并发只会互相拖慢）。 */
+private const val FILL_CONCURRENCY = 2
+private const val FILL_CONCURRENCY_WEAK = 1
+
+/** 单页取图超过这个耗时就算弱网（空闲预取据此降并发）。 */
+private const val SLOW_FETCH_MS = 1_500L
 
 /** 单页取图的最大尝试次数（含首次）：网络抖动时自动重试，仍失败才落到可点重试的占位块。 */
 private const val MAX_ATTEMPTS = 3
@@ -355,8 +394,11 @@ private class ZoomState(private val scope: CoroutineScope) {
 /**
  * 阅读器的可变状态（由 [AppShell] 持有）。
  *
- * 一次浏览会话 = 一个 Python 侧句柄（[source]）；已解码的页留在 [bitmaps] 里并按
- * 「离当前页最远」淘汰，不做 `recycle()`（交给 GC，避免与正在显示的组件打架）。
+ * 一次浏览会话 = 一个 Python 侧句柄（[source]）；页数据分两层缓存：
+ * - [raws]：原始图片字节，容量大（[MAX_CACHED_RAW_PAGES] 页 / [MAX_CACHED_RAW_BYTES] 字节），
+ *   是「翻回去不用重下」的依据；
+ * - [bitmaps]：解码后的位图，容量小（[MAX_CACHED_PAGES] 页），命中 [raws] 时按需现解。
+ * 两者都按「离当前页最远」淘汰，不做 `recycle()`（交给 GC，避免与正在显示的组件打架）。
  *
  * 注意：**当前页码不存在这里** —— 竖排 / 横排各自的滚动位置才是唯一真相，
  * 由 [ReaderScreen] 从 `LazyListState` / `PagerState` 推导（见那里的说明）。
@@ -420,10 +462,15 @@ class ReaderState {
     val failures = mutableStateMapOf<Int, String>()
 
     /**
-     * 各页的**原始图片字节**（未解码）。只用来支持「保存当前页到相册」：
-     * 原样落盘，不重新编码，画质与在线浏览看到的完全一致。
+     * 各页的**原始图片字节**（未解码）：本阅读器的主力缓存。
      *
-     * 体积远小于解码后的位图（一页几百 KB vs 9 MB），因此与 [bitmaps] 同窗口淘汰。
+     * 两个用途：
+     * - 「保存当前页到相册」原样落盘，不重新编码，画质与在线浏览看到的完全一致；
+     * - 翻页时若 [bitmaps] 里没有该页，但这里命中，就直接本地解码，**不再联网 / 读盘**。
+     *
+     * 容量按 [MAX_CACHED_RAW_PAGES] 页 / [MAX_CACHED_RAW_BYTES] 字节双上限淘汰（见 [trimRaws]），
+     * 与解码位图（[MAX_CACHED_PAGES] 页）分开计数 —— 位图很贵、字节便宜，混在一起限会让
+     * 「往回翻」几乎必然重新下载。
      */
     val raws = mutableStateMapOf<Int, ByteArray>()
 
@@ -436,6 +483,12 @@ class ReaderState {
 
     /** 最近的聚焦页（预取窗口的锚点），淘汰缓存时按它取「离得最远」的页。 */
     private var center = 0
+
+    /** 最近一次取图的耗时（毫秒）：用来判断是不是弱网（弱网时空闲预取降并发）。 */
+    private var lastFetchMillis = 0L
+
+    /** 空闲超额预取的「代次」：每发起一轮就自增，让上一轮自己停下来。 */
+    private var fillEpoch = 0
 
     /** 首次铺页是否已经做过（每开一次会话铺一次）。 */
     private var initialDone = false
@@ -537,6 +590,45 @@ class ReaderState {
     }
 
     /**
+     * 空闲时的「超额预取」：从 [anchor] 往后连续取到 [cap] 页（**硬上限**）。
+     *
+     * 与 [prefetch] 的分工：那个只铺「眼前几屏」（窗口 3 页、并发高、优先保证当前页不空白）；
+     * 这个是在页面静止时把后面的页也提前拉下来，把空闲带宽用满。两者都以 [raws] 为命中依据，
+     * 因此不会重复取同一页。
+     *
+     * 停止是**协作式**的（看 [fillEpoch] 与 [center]），不靠取消协程：已经发出的请求会跑完并把
+     * 结果留在缓存里 —— 用户翻页时不会白花已经用掉的流量。
+     */
+    fun startFill(scope: CoroutineScope, anchor: Int, cap: Int) {
+        if (pageCount <= 0) return
+        val epoch = ++fillEpoch
+        scope.launch { fillAhead(anchor, cap, epoch) }
+    }
+
+    private suspend fun fillAhead(anchor: Int, cap: Int, epoch: Int) {
+        val start = anchor + 1
+        val end = minOf(pageCount - 1, anchor + cap)
+        if (start > end) return
+        val workers =
+            if (lastFetchMillis > SLOW_FETCH_MS) FILL_CONCURRENCY_WEAK else FILL_CONCURRENCY
+        coroutineScope {
+            var next = start
+            repeat(workers) {
+                launch {
+                    while (true) {
+                        if (epoch != fillEpoch) return@launch          // 又翻页了：本轮到此为止
+                        val index = next
+                        if (index > end) return@launch
+                        next += 1
+                        if (abs(index - center) > cap) return@launch    // 已经滑远：别再往后铺
+                        ensure(index) { abs(index - center) > cap }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
      * 确保第 index 页已解码进缓存。
      *
      * 取图与解码都不在主线程；失败自动重试 [MAX_ATTEMPTS] 次，仍失败才记下原因
@@ -551,11 +643,27 @@ class ReaderState {
         try {
             gate.withPermit {
                 if (stale?.invoke() == true) return
+                // 【省流量的关键】原始字节已在缓存里：只做本地解码，不再联网 / 读盘。
+                // 快速翻过几十页再翻回来时走的就是这条路径。
+                val cached = raws[index]
+                if (cached != null) {
+                    val decoded = withContext(Dispatchers.Default) { decodePage(cached) }
+                    if (decoded != null) {
+                        bitmaps[index] = decoded
+                        failures.remove(index)
+                        trim()
+                        return
+                    }
+                    raws.remove(index)   // 字节坏了：丢掉它，走正常取图
+                }
                 var attempt = 1
                 var error = "取图失败"
                 while (true) {
+                    val started = System.currentTimeMillis()
                     when (val result = ApiBridge.readerPage(handle, index)) {
                         is ApiResult.Ok -> {
+                            // 记下这次取图耗时：空闲预取据此判断是否弱网、要不要降并发
+                            lastFetchMillis = System.currentTimeMillis() - started
                             // 解码一页约 9 MB 位图，放 Default 线程，别卡住滑动
                             val bitmap = withContext(Dispatchers.Default) {
                                 decodePage(result.value.data)
@@ -589,18 +697,47 @@ class ReaderState {
         failures.remove(index)
     }
 
-    /** 只留离聚焦页最近的若干页，多余的丢掉引用让系统回收。 */
+    /**
+     * 缓存淘汰：位图与原始字节**分开**按各自上限削，一律丢掉离聚焦页最远的那些。
+     *
+     * 分开的原因见 [raws] 的说明 —— 位图贵（一页约 9 MB）只留几页，字节便宜可以留上百页。
+     */
     private fun trim() {
+        trimBitmaps()
+        trimRaws()
+    }
+
+    /** 位图：只留离聚焦页最近的 [MAX_CACHED_PAGES] 页。 */
+    private fun trimBitmaps() {
         if (bitmaps.size <= MAX_CACHED_PAGES) return
-        val pivot = center
-        val drop = bitmaps.keys
-            .sortedByDescending { abs(it - pivot) }
+        bitmaps.keys
+            .sortedByDescending { abs(it - center) }
             .take(bitmaps.size - MAX_CACHED_PAGES)
-        drop.forEach {
-            bitmaps.remove(it)
-            names.remove(it)
-            raws.remove(it)
+            .forEach { bitmaps.remove(it) }
+    }
+
+    /** 原始字节：先削页数，再削总字节；两次都按「离聚焦页最远」优先。 */
+    private fun trimRaws() {
+        if (raws.size > MAX_CACHED_RAW_PAGES) {
+            raws.keys
+                .sortedByDescending { abs(it - center) }
+                .take(raws.size - MAX_CACHED_RAW_PAGES)
+                .forEach { dropRaw(it) }
         }
+        var total = raws.values.sumOf { it.size }
+        if (total <= MAX_CACHED_RAW_BYTES) return
+        for (key in raws.keys.sortedByDescending { abs(it - center) }) {
+            if (total <= MAX_CACHED_RAW_BYTES) break
+            val bytes = raws[key] ?: continue
+            dropRaw(key)
+            total -= bytes.size
+        }
+    }
+
+    /** 丢掉一页的原始字节（文件名与它同生命周期，一并丢掉）。 */
+    private fun dropRaw(index: Int) {
+        raws.remove(index)
+        names.remove(index)
     }
 }
 
@@ -630,6 +767,10 @@ class ReaderState {
 @Composable
 fun ReaderScreen(
     state: ReaderState,
+    /** 下载队列状态：阅读器内「下载本子」入队后刷新一次（与详情页一致）。 */
+    queue: QueueState,
+    /** 入队前先落盘下载选项（与详情页的下载按钮同一套动作）。 */
+    saveDownloadConf: suspend () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val view = LocalView.current
@@ -686,6 +827,91 @@ fun ReaderScreen(
             storageLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
         }
     }
+    // ---- 在线本子：阅读器内的「下载 / 收藏」（与详情页完全一致的交互；本地阅读不显示）----
+    val albumId = state.source?.albumId.orEmpty()
+    val albumActions = state.source?.online == true && albumId.isNotEmpty()
+    var favorited by remember { mutableStateOf(false) }
+    var folderDialogOpen by remember { mutableStateOf(false) }
+    var folders by remember { mutableStateOf<List<FavoriteFolder>>(emptyList()) }
+    var foldersLoading by remember { mutableStateOf(false) }
+    var foldersError by remember { mutableStateOf<String?>(null) }
+
+    // 进入本子时取一次收藏状态（与详情页同源；取不到就按未收藏显示，点一下会走「选收藏夹」）
+    LaunchedEffect(state.source) {
+        favorited = false
+        if (!albumActions) return@LaunchedEffect
+        when (val result = ApiBridge.albumDetail(albumId)) {
+            is ApiResult.Ok -> favorited = result.value.favorited
+            is ApiResult.Err -> Unit
+        }
+    }
+
+    /** 直接下载：先落盘下载选项，再入队（与详情页的「下载」按钮同一套动作）。 */
+    fun downloadAlbum() {
+        scope.launch {
+            saveDownloadConf()
+            when (val result = ApiBridge.queueEnqueue(listOf(albumId))) {
+                is ApiResult.Ok -> {
+                    val text = if (result.value.added.isNotEmpty()) {
+                        context.getString(
+                            R.string.status_task_enqueued, result.value.added.size.toString()
+                        )
+                    } else {
+                        context.getString(
+                            R.string.status_task_duplicated,
+                            result.value.duplicated.joinToString(", "),
+                        )
+                    }
+                    Toast.makeText(context, text, Toast.LENGTH_SHORT).show()
+                    queue.refresh()
+                }
+
+                is ApiResult.Err -> Toast.makeText(
+                    context,
+                    context.getString(R.string.status_error_hint, result.message),
+                    Toast.LENGTH_SHORT,
+                ).show()
+            }
+        }
+    }
+
+    /** 收藏夹弹窗：先打开（带加载态），再异步取列表。 */
+    fun openFavoriteDialog() {
+        folderDialogOpen = true
+        foldersLoading = true
+        foldersError = null
+        folders = emptyList()
+        scope.launch {
+            when (val result = ApiBridge.favoriteFolders()) {
+                is ApiResult.Ok -> folders = result.value
+                is ApiResult.Err -> foldersError = result.message
+            }
+            foldersLoading = false
+        }
+    }
+
+    /** 收藏按钮：已收藏＝取消，未收藏＝选收藏夹加入（与详情页一致）。 */
+    fun toggleFavorite() {
+        if (!favorited) {
+            openFavoriteDialog()
+            return
+        }
+        scope.launch {
+            when (val result = ApiBridge.favoriteRemove(albumId)) {
+                is ApiResult.Ok -> {
+                    favorited = false
+                    Toast.makeText(context, R.string.status_favorite_removed, Toast.LENGTH_SHORT).show()
+                }
+
+                is ApiResult.Err -> Toast.makeText(
+                    context,
+                    context.getString(R.string.status_favorite_remove_failed, result.message),
+                    Toast.LENGTH_SHORT,
+                ).show()
+            }
+        }
+    }
+
     // 两套滚动状态由 ReaderState 常驻：去「阅读设置 / 书签」页再回来不会跳回第一页
     val listState = state.listState
     val pagerState = state.pagerState
@@ -711,6 +937,26 @@ fun ReaderScreen(
         snapshotFlow {
             if (state.vertical) listState.firstVisibleItemIndex else pagerState.currentPage
         }.collect { page -> state.prefetch(scope, page) }
+    }
+
+    // 空闲超额预取：页面静止 [PREFETCH_IDLE_DELAY_MS] 后，往后连续取到硬上限
+    // （竖式 24 页 / 横式 5 页），把空闲带宽用满。
+    //
+    // 用 collectLatest：一旦又开始翻页就立刻取消计时并重新开始，不会把带宽花在已经滑过去的位置。
+    // 真正取图的 job 由 startFill 起在 scope 上（不随 collectLatest 取消），靠「代次」协作式停下 ——
+    // 已经发出的请求会跑完并留在缓存里，不浪费已经用掉的流量。
+    LaunchedEffect(state.source) {
+        snapshotFlow {
+            if (state.vertical) listState.firstVisibleItemIndex else pagerState.currentPage
+        }.collectLatest { page ->
+            delay(PREFETCH_IDLE_DELAY_MS)
+            val cap = if (state.vertical) {
+                MAX_PREFETCH_AHEAD_VERTICAL
+            } else {
+                MAX_PREFETCH_AHEAD_HORIZONTAL
+            }
+            state.startFill(scope, page, cap)
+        }
     }
 
     val jumpTo: suspend (Int) -> Unit = { target ->
@@ -831,6 +1077,10 @@ fun ReaderScreen(
                         else pagerState.scrollToPage(target)
                     }
                 },
+                showAlbumActions = albumActions,
+                favorited = favorited,
+                onDownload = { downloadAlbum() },
+                onToggleFavorite = { toggleFavorite() },
             )
         }
     }
@@ -849,6 +1099,34 @@ fun ReaderScreen(
             state = state,
             currentPage = currentPage,
             onClose = { state.bookmarkAddOpen = false },
+        )
+    }
+    // 阅读器内「收藏」的收藏夹选择弹窗（与详情页共用同一组件）
+    if (folderDialogOpen) {
+        FavoriteFolderDialog(
+            folders = folders,
+            loading = foldersLoading,
+            error = foldersError,
+            onConfirm = { folderId ->
+                folderDialogOpen = false
+                scope.launch {
+                    when (val result = ApiBridge.favoriteAdd(albumId, folderId)) {
+                        is ApiResult.Ok -> {
+                            favorited = true
+                            Toast.makeText(
+                                context, R.string.status_favorite_added, Toast.LENGTH_SHORT
+                            ).show()
+                        }
+
+                        is ApiResult.Err -> Toast.makeText(
+                            context,
+                            context.getString(R.string.status_favorite_add_failed, result.message),
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                    }
+                }
+            },
+            onDismiss = { folderDialogOpen = false },
         )
     }
 }
@@ -1081,7 +1359,8 @@ private fun PagePlaceholder(state: ReaderState, index: Int) {
 }
 
 /**
- * 底部控制栏：页码 + 进度滑杆 + 缩放 / 横竖切换 + 快捷选章 + 添加书签 + 上页 / 跳页 / 下页。
+ * 底部控制栏：页码 + 进度滑杆 + 缩放 / 横竖切换 + 快捷选章 + 添加书签 + 保存当前页
+ * + 下载 / 收藏（仅在线本子）+ 上页 / 跳页 / 下页。
  *
  * [currentPage] 与 [zoomPercent] 特意做成 lambda：让「页码 / 缩放订阅」落在本组件里，
  * 滑动与缩放不牵动阅读器整屏重组。
@@ -1099,6 +1378,12 @@ private fun ReaderControls(
     onJump: (Int) -> Unit,
     onSavePage: () -> Unit,
     onToggleMode: () -> Unit,
+    /** 是否显示「下载 / 收藏」：只对探索页打开的在线本子显示，资源管理器的本地阅读不显示。 */
+    showAlbumActions: Boolean,
+    /** 当前本子是否已收藏（决定收藏按钮的实心 / 空心图标）。 */
+    favorited: Boolean,
+    onDownload: () -> Unit,
+    onToggleFavorite: () -> Unit,
 ) {
     var dragging by remember { mutableStateOf<Float?>(null) }
     var jumpOpen by remember { mutableStateOf(false) }
@@ -1195,7 +1480,7 @@ private fun ReaderControls(
                     Text("+", style = MaterialTheme.typography.titleMedium)
                 }
             }
-            // 第 2 行：横竖切换 / 快捷选章 / 添加书签 / 上页 / 跳页 / 下页
+            // 第 2 行：横竖切换 / 快捷选章 / 添加书签 / 保存当前页 / 下载 / 收藏 / 上页 / 跳页 / 下页
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -1231,14 +1516,38 @@ private fun ReaderControls(
                     )
                 }
                 // 保存当前页到相册（原图落盘，文件名为「本子ID-页码」）
+                // 用「软盘」图标与「下载本子」区分（下载是整本入队，保存是当前页落盘）
                 IconButton(
                     onClick = onSavePage,
                     modifier = Modifier.size(36.dp),
                 ) {
                     Icon(
-                        painter = painterResource(R.drawable.ic_download),
+                        painter = painterResource(R.drawable.ic_save),
                         contentDescription = stringResource(R.string.reader_save_page),
                     )
+                }
+                // 「下载本子 / 收藏」只对探索页打开的在线本子显示（与详情页同名图标与交互）
+                if (showAlbumActions) {
+                    IconButton(
+                        onClick = onDownload,
+                        modifier = Modifier.size(36.dp),
+                    ) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_download),
+                            contentDescription = stringResource(R.string.btn_download_now),
+                        )
+                    }
+                    IconButton(
+                        onClick = onToggleFavorite,
+                        modifier = Modifier.size(36.dp),
+                    ) {
+                        Icon(
+                            painter = painterResource(
+                                if (favorited) R.drawable.ic_star else R.drawable.ic_star_border
+                            ),
+                            contentDescription = stringResource(R.string.btn_favorite),
+                        )
+                    }
                 }
                 Spacer(Modifier.weight(1f))
                 IconButton(

@@ -66,6 +66,42 @@ COVER_WORKERS = 8
 # 详情页「预览前 5 页」最多取几张
 PREVIEW_LIMIT = 5
 
+# 预览页的取图并发（详情页首屏速度的主要来源：串行时 5 页要等 5 个网络来回）
+PREVIEW_WORKERS = 5
+
+# jmcomic 请求的超时（秒）。
+#
+# 【为什么必须显式给】jmcomic 的 requests 后端默认不传 ``timeout``，requests 收到
+# ``timeout=None`` 就是「永不超时」。实测站点的网页域名与「永久网域」都会出现
+# 连接被重置 / 无响应的情况，一旦碰上，整条请求链会**永久挂住**——界面上就是
+# 「按钮一直灰着，既不成功也不报错」。
+#
+# 【为什么必须是数字而不是 (连接, 读取) 元组】jmcomic 的 option 会经 YAML 序列化一轮，
+# 元组会被变成 list，而 requests 只认「元组」或「数字」，收到 list 会直接抛
+#   ValueError: Timeout value connect was [10, 30], but it must be an int, float or None.
+# 于是**所有**请求（连 /setting 都发不出去）全部失败 —— v2.6.1 曾因此整包不可用，
+# 务必不要再写成元组。
+#
+# 取值说明：同一个数字会同时用作连接超时与读取超时。15 秒既能让不通的域名较快跳过，
+# 也远大于正常下载时「两次数据之间」的间隔（正常是毫秒级），不会误伤大图下载。
+REQUEST_TIMEOUT = 15
+
+# 网页端（HTML）域名：jmcomic 的永久网域解析（jm365.work）实测不稳，改从发布页取列表
+_PUB_URL = "https://jmcomicgo.org"
+_PUB_HEADERS = {"User-Agent": "Mozilla/5.0"}
+
+# 探测网页域名用的「评论接口」与空数据（未登录 + 不存在的本子，服务端只会回 JSON 提示）
+_COMMENT_PATH = "/ajax/album_comment"
+_COMMENT_PROBE_DATA = {"video_id": "0", "comment": "", "originator": "", "status": "true"}
+# 探测用的短超时（探不动的域名要尽快跳过，别把首次发评论拖到几十秒）。
+# 这里是**直接调 requests**，所以 (连接, 读取) 元组是合法的；只有经 jmcomic option
+# 下发的超时才必须是数字（见 REQUEST_TIMEOUT 的说明）。
+_PROBE_TIMEOUT = (3, 6)
+
+# 本会话的网页域名：候选列表（取自发布页）与「实测能发评论」的可用列表（顺序可被调整）
+_web_candidates_cache = None
+_web_usable_cache = None
+
 # 预览图重新编码时的 JPEG 质量（站点图片本身是打乱的，必须重排后重编码）
 PREVIEW_QUALITY = 92
 
@@ -80,9 +116,34 @@ def album_url(album_id, domain=SITE_DOMAIN):
     return jmcomic.JmcomicText.format_album_url(str(album_id), domain)
 
 
+def _image_domain_for(album_id):
+    """按本子 ID **稳定地**挑一个图片 CDN 域名（同一个本子永远得到同一个域名）。
+
+    不能沿用 jmcomic 的默认行为：它在 ``DOMAIN_IMAGE_LIST`` 里 ``random.choice``，同一个本子
+    每次拿到的封面 URL 都不一样。Kotlin 侧的封面缓存是按 URL 作键的，于是**永远命中不了** ——
+    每次进榜单 / 收藏 / 浏览记录 / 详情页都要把满屏封面重新下一遍（表现为「满屏占位底框」），
+    也白白多耗流量。这里按 ID 取模选域名：URL 稳定可缓存，同时仍把负载分散到各个 CDN。
+    """
+    # 排序后再取模：jmcomic 的域名列表在导入时是打乱过的，排一下序能让「本子 → 域名」
+    # 的映射跨进程也稳定（否则重启后同一本子的封面 URL 会变，缓存又白费一次）。
+    domains = sorted(getattr(jmcomic.JmModuleConfig, "DOMAIN_IMAGE_LIST", None) or [])
+    if not domains:
+        return None
+    try:
+        index = int(str(album_id).strip()) % len(domains)
+    except (TypeError, ValueError):
+        index = 0
+    return domains[index]
+
+
 def cover_url(album_id, size=COVER_SIZE):
-    """拼接封面图 URL（只拼地址，不下载）。"""
-    return jmcomic.JmcomicText.get_album_cover_url(str(album_id), size=size)
+    """拼接封面图 URL（只拼地址，不下载）。
+
+    必须显式传入确定的图片域名，理由见 :func:`_image_domain_for`。
+    """
+    return jmcomic.JmcomicText.get_album_cover_url(
+        str(album_id), image_domain=_image_domain_for(album_id), size=size
+    )
 
 
 def fetch_image_bytes(url):
@@ -146,16 +207,26 @@ def _fetch_preview_images(conf, album_id, limit, with_login):
     client = build_option(conf, with_login=with_login).new_jm_client()
     photo = client.get_album_detail(album_id)[0]
     client.check_photo(photo)              # 补全图片 URL 等信息
-    pages = []
-    error = None
-    for index in range(min(limit, len(photo))):
-        try:
-            pages.append(fetch_page_image(client, photo.getindex(index)))
-        except Exception as exc:           # 个别页失败不影响其余几页
-            error = exc
-    if not pages:
-        raise error if error is not None else ValueError("没有取到预览图片")
-    return pages
+
+    # 前几页**并发**取：原先是一页一页串行，详情页要等 limit 个网络来回；并发后总耗时≈最慢那一页。
+    # 完成顺序是乱的，所以按下标回填、最后仍按页号输出。
+    indexes = list(range(min(limit, len(photo))))
+    pages = [None] * len(indexes)
+    errors = [None] * len(indexes)
+    if indexes:
+        with ThreadPoolExecutor(max_workers=min(PREVIEW_WORKERS, len(indexes))) as pool:
+            futures = [(i, pool.submit(fetch_page_image, client, photo.getindex(i)))
+                       for i in indexes]
+            for i, future in futures:
+                try:
+                    pages[i] = future.result()
+                except Exception as exc:   # 个别页失败不影响其余几页
+                    errors[i] = exc
+    result = [page for page in pages if page is not None]
+    if not result:
+        first_error = next((err for err in errors if err is not None), None)
+        raise first_error if first_error is not None else ValueError("没有取到预览图片")
+    return result
 
 
 def fetch_page_image(client, detail):
@@ -235,7 +306,7 @@ def pdf_filename_rule(dir_rule_dsl):
     return segments[-1]
 
 
-def build_option(conf, with_login=True, progress=False):
+def build_option(conf, with_login=True, progress=False, impl=None):
     """根据界面配置构建 jmcomic Option。
 
     app 段的下载目录、并发数、是否生成 PDF 会覆盖 option 段中的同名项；
@@ -247,6 +318,9 @@ def build_option(conf, with_login=True, progress=False):
 
     ``progress=True`` 时额外注入 :mod:`core.progress_plugin` 的进度插件
     （任务队列用它统计每个任务的页数进度）。
+
+    ``impl`` 指定客户端实现（``api`` / ``html``）；为 None 时沿用配置里的默认值。
+    发布评论等只有网页端实现支持的接口需要传 ``"html"``。
     """
     app_conf = conf.get("app") or {}
     download_dir = resolve_path(app_conf.get("download_dir"))
@@ -254,6 +328,12 @@ def build_option(conf, with_login=True, progress=False):
 
     # 安卓端固定 requests 后端（没有可用的 curl_cffi）
     data.setdefault("client", {}).setdefault("postman", {})["type"] = "requests"
+    if impl:
+        data.setdefault("client", {})["impl"] = impl
+
+    # 所有 jmcomic 请求都必须带上超时，否则一旦连接被静默丢弃就会永久挂住（见 REQUEST_TIMEOUT）
+    data.setdefault("client", {}).setdefault("postman", {}).setdefault(
+        "meta_data", {}).setdefault("timeout", REQUEST_TIMEOUT)
 
     download_conf = data.setdefault("download", {})
     threading_conf = download_conf.setdefault("threading", {})
@@ -322,6 +402,10 @@ _session_lock = threading.Lock()
 _session_client = None
 _session_credentials = None
 
+# 网页端（HTML）实现的登录客户端及其凭据：发布评论等只有网页端支持的接口用它
+_web_session_client = None
+_web_session_credentials = None
+
 
 def reset_jm_session():
     """丢弃 jmcomic 的全局登录会话。
@@ -335,15 +419,17 @@ def reset_jm_session():
     jmcomic.JmModuleConfig.APP_COOKIES = None
 
 
-def fresh_login_client(conf):
+def fresh_login_client(conf, impl=None):
     """建一个「不带任何历史会话」的客户端，供登录 / 校验身份使用。
 
     先清掉全局 cookies 缓存，再让客户端重建：``new_jm_client`` 的初始化会重新请求
     ``/setting``，拿到一个全新的 ``AVS``（未被绑定到任何账号），登录请求因此不会命中
     上一个账号的会话。
+
+    ``impl`` 指定客户端实现（``api`` / ``html``）；为 None 时用配置默认值。
     """
     reset_jm_session()
-    return build_option(conf, with_login=False).new_jm_client()
+    return build_option(conf, with_login=False, impl=impl).new_jm_client()
 
 
 def logged_in_client(conf, relogin=False):
@@ -381,10 +467,12 @@ def reset_session_client():
 
     除了本模块缓存的登录客户端，还要清掉 jmcomic 的全局 cookies（见
     :func:`reset_jm_session`），否则下一个账号登录时仍会命中上一个账号的会话。
+    网页端（HTML）登录客户端一并丢弃。
     """
-    global _session_client, _session_credentials
+    global _session_client, _session_credentials, _web_session_client, _web_session_credentials
     with _session_lock:
         _session_client, _session_credentials = None, None
+        _web_session_client, _web_session_credentials = None, None
     reset_jm_session()
 
 
@@ -433,6 +521,144 @@ def _login_new_client(conf, username, password):
         except jmcomic.RequestRetryAllFailException as exc:
             last_error = exc            # 这个域名不通（或被挡），换下一个再试
     raise last_error or jmcomic.JmcomicException("登录失败：禁漫接口域名都不可用", {})
+
+
+def _web_candidates(conf):
+    """候选的「网页端（HTML）」域名（缓存一次）。
+
+    为什么不用 ``JmModuleConfig.get_html_domain()`` 那一条：它依赖永久网域
+    ``jm365.work`` 的重定向，实测在 requests 后端下会**连接被重置**，解析结果还可能
+    是完全无关的域名（实测曾解析成 google.com）。发布页 ``jmcomicgo.org`` 实测可达，
+    从中取全部网页域名要稳得多。
+    """
+    global _web_candidates_cache
+    if _web_candidates_cache is not None:
+        return list(_web_candidates_cache)
+
+    domains = []
+    try:
+        resp = requests.get(_PUB_URL, headers=_PUB_HEADERS, timeout=REQUEST_TIMEOUT)
+        from jmcomic.jm_toolkit import JmcomicText
+        domains.extend(JmcomicText.analyse_jm_pub_html(resp.text))
+    except Exception:
+        pass
+    # 兜底：发布页取不到（或一个域名都没解析出来）时，才试一次 jmcomic 的永久网域解析。
+    # 它依赖 jm365.work 的重定向，实测既不稳（连接重置）又可能给出无关域名（曾解析成
+    # google.com），所以只在没有候选时才走它，别让它拖慢正常路径。
+    if not domains:
+        try:
+            fallback = jmcomic.JmModuleConfig.get_html_domain()
+            if fallback:
+                domains.append(fallback)
+        except Exception:
+            pass
+
+    # 去重，并丢掉带路径 / 不像漫画站（域名里既无 jm 也无 comic）的项：
+    # 发布页里混着「APP 下载」之类的条目，永久网域解析也可能给出无关域名。
+    cleaned = []
+    for item in domains:
+        text = str(item or "").strip().strip("/").lower()
+        if not text or "/" in text or "." not in text:
+            continue
+        if "jm" not in text and "comic" not in text:
+            continue
+        if text not in cleaned:
+            cleaned.append(text)
+    _web_candidates_cache = cleaned
+    return list(cleaned)
+
+
+def _probe_web_domain(domain):
+    """这个网页域名是否真的**能发评论**：用空数据打一次 ``/ajax/album_comment``。
+
+    为什么探评论接口而不是探 ``/login``：实测 ``/login`` 能通的域名
+    （例如 ``comic18j-guta.site``）在 ``/ajax/album_comment`` 上会被连接重置 ——
+    只探 ``/login`` 会挑出一个「登录得了、评论发不出去」的域名。
+    未登录 + 不存在的本子，服务端只会回「请先登录 / 参数错误」这类 JSON，没有任何副作用。
+    """
+    try:
+        resp = requests.post(
+            "https://%s%s" % (domain, _COMMENT_PATH),
+            data=_COMMENT_PROBE_DATA,
+            headers=_PUB_HEADERS,
+            timeout=_PROBE_TIMEOUT,
+            allow_redirects=False,
+        )
+        if resp.status_code != 200:
+            return False
+        payload = resp.json()
+        return isinstance(payload, dict) and "status" in payload
+    except Exception:
+        return False
+
+
+def _usable_web_domains(conf):
+    """本会话真正能发评论的网页域名（**并发探测一次**后缓存，按发布页顺序）。
+
+    并发而不是串行：串行时个别域名会卡到连接超时，把首次发评论拖到几十秒。
+    探测本身用空数据打评论接口，不产生任何副作用（见 :func:`_probe_web_domain`）。
+    """
+    global _web_usable_cache
+    if _web_usable_cache:
+        return list(_web_usable_cache)
+
+    domains = _web_candidates(conf)
+    if not domains:
+        raise jmcomic.JmcomicException("找不到可用的禁漫网页域名，请稍后重试", {})
+    with ThreadPoolExecutor(max_workers=min(8, len(domains))) as pool:
+        flags = list(pool.map(_probe_web_domain, domains))
+    usable = [domain for domain, ok in zip(domains, flags) if ok]
+    if not usable:
+        raise jmcomic.JmcomicException("禁漫网页域名都不可用，请检查网络后重试", {})
+    _web_usable_cache = usable
+    return list(usable)
+
+
+def _login_new_web_client(conf, username, password):
+    """建网页端（HTML）客户端并登录，返回锁定在「登录成功域名」上的客户端。
+
+    与 :func:`_login_new_client` 的差别：网页端 ``login()`` 自带成功校验（返回的是
+    原始响应，没有 ``res_data``），因此这里只兜「域名不通」并换下一个；登录被服务端
+    明确拒绝（如密码错误）时异常直接上抛，不再无谓地试其它域名。
+
+    域名来自 :func:`_usable_web_domains`（已实测能发评论），按顺序登录，第一个成功即返回。
+    """
+    domains = _usable_web_domains(conf)
+
+    reset_jm_session()
+    option = build_option(conf, with_login=False, impl="html")
+    option.client.retry_times = 2      # 每个域名最多试 3 次，别耗在重试上
+    client = option.new_jm_client(domain_list=[domains[0]])
+
+    last_error = None
+    for domain in domains:
+        client.domain_list = [domain]
+        try:
+            client.login(username, password)
+            return client
+        except jmcomic.RequestRetryAllFailException as exc:
+            last_error = exc            # 这个域名不通（或被挡），换下一个再试
+    raise last_error or jmcomic.JmcomicException("登录失败：禁漫网页域名都不可用", {})
+
+
+def web_login_client(conf):
+    """取本会话用于「网页端（HTML）实现」接口的登录客户端（发布评论等）。
+
+    移动端 API 客户端不支持评论发布（jmcomic 直接抛 ``NotImplementedError``），
+    必须走网页端实现。与 :func:`logged_in_client` 一样按凭据缓存并锁定域名，
+    换账号后自动重建。
+    """
+    global _web_session_client, _web_session_credentials
+    username, password = account.get_credentials()
+    if not (username and password):
+        raise jmcomic.JmcomicException("未登录：请先在「账号」页登录后再试", {})
+    credentials = (username, password)
+    with _session_lock:
+        if _web_session_client is not None and _web_session_credentials == credentials:
+            return _web_session_client
+        client = _login_new_web_client(conf, username, password)
+        _web_session_client, _web_session_credentials = client, credentials
+        return client
 
 
 def collect_pdfs(result):

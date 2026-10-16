@@ -23,6 +23,7 @@ import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.ParcelFileDescriptor
 import android.provider.OpenableColumns
+import android.util.LruCache
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
@@ -147,8 +148,8 @@ class ExplorerState {
     var sortKey by mutableStateOf(DEFAULT_SORT)
     var sortDesc by mutableStateOf(false)
 
-    /** 列表 / 方格视图。 */
-    var viewMode by mutableStateOf(VIEW_LIST)
+    /** 列表 / 方格视图：默认方格（v2.6.1 起把默认展示形式从列表改为方格）。 */
+    var viewMode by mutableStateOf(VIEW_GRID)
 
     /** 全部 / 仅 PDF / 仅文件夹。 */
     var typeFilter by mutableStateOf(FILTER_ALL)
@@ -901,12 +902,20 @@ private fun GridCell(
     selected: Boolean,
     onToggle: () -> Unit,
 ) {
-    var cover by remember(path) { mutableStateOf<ImageBitmap?>(null) }
+    // 封面：命中缓存就**首帧直接显示**（不闪占位底框），未命中才异步解码 / 渲染。
+    // 之前这里是「先空一帧、再异步填」，加上方格视图没有缓存，一滚动 / 一切页就满屏占位底框。
+    var cover by remember(path) { mutableStateOf(ExplorerCoverCache.get(path)) }
     LaunchedEffect(path) {
         if (cover == null) {
-            cover = withContext(Dispatchers.IO) { loadExplorerCover(path, isFolder) }
+            val loaded = withContext(Dispatchers.IO) { loadExplorerCover(path, isFolder) }
+            if (loaded != null) {
+                ExplorerCoverCache.put(path, loaded)
+                cover = loaded
+            }
         }
     }
+    // 只在封面变化时包一次 ImageBitmap，避免每次重组都新建包装对象
+    val coverImage: ImageBitmap? = remember(cover) { cover?.asImageBitmap() }
     Column(
         modifier = Modifier
             .clip(RoundedCornerShape(8.dp))
@@ -927,7 +936,7 @@ private fun GridCell(
                 .clip(RoundedCornerShape(4.dp))
                 .background(MaterialTheme.colorScheme.surfaceVariant),
         ) {
-            val image = cover
+            val image = coverImage
             if (image != null) {
                 Image(
                     bitmap = image,
@@ -968,10 +977,39 @@ private fun GridCell(
     }
 }
 
+/**
+ * 资源管理器方格封面的内存缓存（按**字节数**计容量，约可用堆的 1/16，下限 8MB）。
+ *
+ * 为什么必须有：封面要么从磁盘解码（图片文件夹的第一张图），要么用 `PdfRenderer`
+ * **渲染 PDF 首页** —— 后者是实打实的重活。没有缓存时，`LazyVerticalGrid` 一回收格子
+ * （滚动、切页签、从别的页面返回）就全部重来一遍，表现就是「满屏先占位底框、再慢慢出图」。
+ *
+ * 键用文件路径：路径本身就是内容的身份（删除 / 导入都会得到新路径），因此不需要额外的失效逻辑；
+ * 容量按字节限，超了就丢最久没用的那张（[LruCache] 自带该行为）。
+ */
+internal object ExplorerCoverCache {
+
+    private val cache = object : LruCache<String, Bitmap>(
+        (Runtime.getRuntime().maxMemory() / 16).toInt().coerceAtLeast(8 * 1024 * 1024)
+    ) {
+        override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
+    }
+
+    fun get(path: String): Bitmap? = if (path.isEmpty()) null else cache.get(path)
+
+    fun put(path: String, bitmap: Bitmap) {
+        if (path.isNotEmpty()) cache.put(path, bitmap)
+    }
+
+    fun clear() {
+        cache.evictAll()
+    }
+}
+
 /** 取封面：图片文件夹用第一张图；PDF 用系统 PdfRenderer 渲染第一页。 */
-private fun loadExplorerCover(path: String, isFolder: Boolean): ImageBitmap? = try {
+private fun loadExplorerCover(path: String, isFolder: Boolean): Bitmap? = try {
     val file = File(path)
-    val bitmap = if (isFolder) {
+    if (isFolder) {
         val first = file.listFiles()
             ?.sortedBy { it.name }
             ?.firstOrNull { it.isFile && it.extension.lowercase() in COVER_IMAGE_EXTS }
@@ -979,7 +1017,6 @@ private fun loadExplorerCover(path: String, isFolder: Boolean): ImageBitmap? = t
     } else {
         renderPdfFirstPage(file, COVER_TARGET_PX)
     }
-    bitmap?.asImageBitmap()
 } catch (_: Throwable) {
     null
 }

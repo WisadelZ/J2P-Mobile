@@ -131,6 +131,21 @@ fun ExploreScreen(
 ) {
     val scope = rememberCoroutineScope()
 
+    // 空闲预取：屏幕静止后往后预取最多 2 页（列表数据 + 封面），翻页时几乎瞬间出图
+    IdleListPrefetch(
+        currentPage = state.uiPage,
+        totalPages = state.totalPages,
+        ready = !state.searching && state.items.isNotEmpty(),
+        fetchPage = { page ->
+            when (val result = ApiBridge.exploreSearch(
+                state.mode, state.keyword, page, state.sort, state.time
+            )) {
+                is ApiResult.Ok -> result.value.items
+                is ApiResult.Err -> null
+            }
+        },
+    )
+
     /** 回到开屏态：清空关键词与结果，作废还在跑的搜索。 */
     fun resetSearch() {
         state.loadEpoch += 1

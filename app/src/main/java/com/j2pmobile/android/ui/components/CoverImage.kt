@@ -37,9 +37,20 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import com.j2pmobile.android.R
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.net.HttpURLConnection
 import java.net.URL
+
+/** 封面取图的全局并发闸：可见封面与空闲预取共用，避免一次涌出几十个请求被 CDN 限流。 */
+private const val COVER_CONCURRENCY = 8
+
+/** 空闲预取封面再收一道闸：保证它不会挤占可见封面的名额（可见的必须优先出图）。 */
+private const val PREFETCH_COVER_CONCURRENCY = 2
+
+private val coverGate = Semaphore(COVER_CONCURRENCY)
+private val prefetchCoverGate = Semaphore(PREFETCH_COVER_CONCURRENCY)
 
 /**
  * 封面图内存缓存：按**字节数**计容量（约可用堆的 1/8，下限 4MB）。
@@ -93,6 +104,22 @@ private fun fetchCoverBitmap(url: String): Bitmap? = try {
 }
 
 /**
+ * 空闲预取：把一张封面提前取进缓存（列表页「屏幕静止时往下多取几页」用）。
+ *
+ * 走**预取专用闸**（并发 2），不会跟可见封面抢名额；失败静默（封面只是点缀）。
+ */
+suspend fun warmCover(url: String) {
+    if (url.isEmpty() || CoverCache.get(url) != null) return
+    prefetchCoverGate.withPermit {
+        if (CoverCache.get(url) != null) return@withPermit
+        coverGate.withPermit {
+            val loaded = withContext(Dispatchers.IO) { fetchCoverBitmap(url) }
+            if (loaded != null) CoverCache.put(url, loaded)
+        }
+    }
+}
+
+/**
  * 封面控件：命中缓存则立即显示，否则异步取图；取不到时显示占位图。
  *
  * 注意：**不做点击放大**（第 4 步的既定交互调整），点击行为由外层卡片统一处理。
@@ -103,7 +130,10 @@ fun CoverImage(url: String, modifier: Modifier = Modifier) {
 
     LaunchedEffect(url) {
         if (url.isNotEmpty() && bitmap == null) {
-            val loaded = withContext(Dispatchers.IO) { fetchCoverBitmap(url) }
+            // 可见封面必须优先出图，所以走全局闸（预取只占其中 2 个名额）
+            val loaded = coverGate.withPermit {
+                withContext(Dispatchers.IO) { fetchCoverBitmap(url) }
+            }
             if (loaded != null) {
                 CoverCache.put(url, loaded)
                 bitmap = loaded

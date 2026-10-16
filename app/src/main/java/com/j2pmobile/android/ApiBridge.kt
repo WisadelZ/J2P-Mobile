@@ -1183,6 +1183,20 @@ object ApiBridge {
         )
     }
 
+    /**
+     * 预热「网页端」评论会话（解析可达的网页域名 + 登录握手）。
+     *
+     * 评论只有网页端实现支持，首次调用要好几秒；进详情页时后台预热一次，
+     * 用户真点「发表评论」时几乎即时返回。失败静默（结果不参与界面判断）。
+     */
+    suspend fun commentWarmup(): ApiResult<Boolean> = withContext(Dispatchers.IO) {
+        val result = PythonBridge.call("comment_warmup")
+        if (!result.optBoolean("ok")) {
+            return@withContext ApiResult.Err(result.optString("error").ifEmpty { "unknown error" })
+        }
+        ApiResult.Ok(result.optBoolean("warmed"))
+    }
+
     // ------------------------------------------------- tag 收藏（本地存储）
 
     /** 本地 tag 收藏夹列表（不含「全部」，那一项由界面补）。 */

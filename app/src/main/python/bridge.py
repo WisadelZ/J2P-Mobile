@@ -34,6 +34,7 @@ import base64
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 import threading
@@ -233,7 +234,11 @@ _search_client = None
 _search_epoch = -1              # 建上面这个客户端时的加载源代次（切源后重建）
 _search_cache = {}              # (key, lib_page) -> (items, total)：检索库页缓存
 _ranking_cache = {}             # (key, lib_page) -> (items, total)：榜单库页缓存
-_SEARCH_CACHE_MAX = 2           # 与桌面版一致：只留最近两个库页
+_SEARCH_CACHE_MAX = 12          # 检索库页缓存上限（一库页 80 条）
+                                # 桌面版只留 2 页；安卓端翻页更频繁（一屏只放得下十几条），
+                                # 留 2 页会让「翻回上一页」几乎必然重新联网，故放宽到 12 页
+                                # （约 960 条，只存元数据与封面 URL，内存代价很小）。
+                                # 上限之外的仍按先进先出淘汰，不会无限增长。
 _SEARCH_PER_UI_PAGE = 18        # 界面每页条数（库每页 80 条，非整除，需跨库页拼接）
 
 
@@ -528,9 +533,19 @@ def _str_list(value):
 # 本子详情页
 # ---------------------------------------------------------------------------
 
-# 预览图缓存：只留最近一个本子的几页（字节留在 Python 内存里，逐页 base64 回传，
-# 避免一次调用把几 MB 塞进同一个 JSON）
+# 预览图缓存：按本子 ID 留最近几本的几页（字节留在 Python 内存里，逐页 base64 回传，
+# 避免一次调用把几 MB 塞进同一个 JSON）。留 3 本是「切回上一本不用重下预览」与
+# 「不常驻太多字节」之间的折中；真正的长期缓存由 Kotlin 侧的页面缓存承担。
+_PREVIEW_CACHE_MAX = 3
 _preview_cache = {}
+
+
+def _cache_preview(album_id, pages):
+    """把一本本子的预览放进缓存（最近使用排最后），超出上限时丢掉最久没用的那本。"""
+    _preview_cache.pop(album_id, None)
+    _preview_cache[album_id] = pages
+    while len(_preview_cache) > _PREVIEW_CACHE_MAX:
+        _preview_cache.pop(next(iter(_preview_cache)))
 
 
 def album_detail(album_id):
@@ -644,15 +659,43 @@ def _comment_json(comment):
     }
 
 
+def _clean_message(exc):
+    """把异常 / 服务端原文清成一行可读提示（去掉 HTML 标签、类名前缀与多余空白）。
+
+    站点拒绝评论时回的是 ``{"status":"0","msg":"<div class=\\"alert ...\\">…</div>"}``，
+    直接丢给界面就是一大串 HTML；这里统一清一下，界面只显示人话。
+    """
+    text = str(exc or "").strip()
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    # 异常文本常带「JmcomicException: 」这类类名前缀，去掉更好读
+    head, sep, tail = text.partition(":")
+    if sep and head.endswith("Exception") and tail.strip():
+        text = tail.strip()
+    return text or "未知错误"
+
+
 def album_comment_post(album_id, content, spoiler=False):
     """发表评论（需登录）。
 
-    移动端接口未封装评论发布，这里直接调站点 ``/comment`` 路由，参数名沿用网页端表单
-    （``video_id / comment / originator / status``）；服务端返回什么就如实回传，
-    成功与否以 ``success`` 字段表示，失败时把服务端的原文提示带出来。
+    评论发布只有**网页端**实现支持：移动端 API 客户端（``JmApiClient``）的
+    ``album_comment`` 会直接抛 ``NotImplementedError``，之前直连 ``/comment``
+    路由的做法在 API 域名上并不存在（实测 API 域名对 ``/ajax/*`` 一律回
+    ``Not legal.ajax``），服务端只会回一个解析不了的响应，于是界面得到
+    「发布评论失败：HTTP」这种看不出原因的错误。
+
+    这里改用网页端（HTML）登录客户端调 ``album_comment``（内部 POST
+    ``/ajax/album_comment``，参数 ``video_id / comment / originator / status``），
+    成功与否由响应里的 ``err`` 字段判定；失败时把服务端的原文提示带出来。
+
+    【重要】网页端域名不能用 jmcomic 默认的「永久网域解析」结果：实测它解析出的
+    域名在 requests 后端下会连接重置，整条请求会一直卡住（界面表现为按钮一直灰着、
+    既不成功也不报错）。域名探测与超时见 :func:`core.downloader._login_new_web_client`
+    与 ``REQUEST_TIMEOUT``。
     """
     try:
         from core import account as account_store
+        from core import downloader as downloader_mod
         aid = str(album_id or "").strip()
         text = str(content or "").strip()
         if not aid:
@@ -661,19 +704,29 @@ def album_comment_post(album_id, content, spoiler=False):
             raise ValueError("评论内容不能为空")
         if not account_store.is_logged_in():
             return _ok(success=False, msg="请先登录后再发表评论")
-        resp = _search_client_instance().req_api(
-            "/comment", get=False, require_success=False,
-            data={"video_id": aid, "comment": text, "originator": "",
-                  "status": "true" if spoiler else "false"})
-        data = _resp_data(resp)
-        status = str((data or {}).get("status") or "").strip().lower()
-        success = status in ("success", "ok", "true", "1")
-        msg = str((data or {}).get("msg") or (data or {}).get("error") or "")
-        if not success and not msg:
-            msg = "HTTP %s" % getattr(resp, "status_code", "")
-        return _ok(success=success, msg=msg)
+        client = downloader_mod.web_login_client(config.load_conf())
+        client.album_comment(aid, text, originator="", status="true" if spoiler else "false")
+        return _ok(success=True, msg="")
     except Exception as exc:
-        return _fail(exc)
+        return _ok(success=False, msg=_clean_message(exc))
+
+
+def comment_warmup():
+    """预热「网页端」评论会话：解析可达的网页域名并完成登录握手。
+
+    评论只有网页端实现支持，首次要现拉网页域名再登录（实测数秒）。界面在进入本子详情页
+    时后台调一次，用户真点「发表评论」就几乎即时返回，不会再出现「按钮灰很久」。
+    未登录 / 网络不通都**静默**（回 ``warmed=False``），不影响任何界面状态。
+    """
+    try:
+        from core import account as account_store
+        from core import downloader as downloader_mod
+        if not account_store.is_logged_in():
+            return _ok(warmed=False)
+        downloader_mod.web_login_client(config.load_conf())
+        return _ok(warmed=True)
+    except Exception:
+        return _ok(warmed=False)
 
 
 def album_preview(album_id):
@@ -687,8 +740,7 @@ def album_preview(album_id):
         if not aid:
             raise ValueError("本子 ID 为空")
         pages = fetch_preview_images(config.load_conf(), aid)
-        _preview_cache.clear()
-        _preview_cache[aid] = pages
+        _cache_preview(aid, pages)
         return _ok(pages=[
             {"width": int(page["size"][0]), "height": int(page["size"][1])}
             for page in pages
@@ -704,6 +756,8 @@ def album_preview_page(album_id, index):
         pages = _preview_cache.get(aid)
         if not pages:
             raise ValueError("预览尚未加载")
+        # 读一次就当成「最近使用」：把它挪到末尾，淘汰时不会先丢它
+        _cache_preview(aid, pages)
         page = pages[int(index)]
         return _ok(
             data=base64.b64encode(page["data"]).decode("ascii"),

@@ -121,6 +121,8 @@ fun AppShell(onRecreate: () -> Unit) {
     val history = remember { HistoryState() }
     val explorer = remember { ExplorerState() }
     val reader = remember { ReaderState() }
+    // 页面级缓存：详情 / 预览缩略图 / 评论在切走再回来时直接复用，随进程退出彻底释放
+    val pageCache = remember { PageCache() }
     val updateCenter = remember { UpdateCenter(context, scope) }
     var albumId by remember { mutableStateOf("") }
     val current = stack.last()
@@ -252,6 +254,18 @@ fun AppShell(onRecreate: () -> Unit) {
             queue.refresh()
             QueueBridge.revision.collect { queue.refresh() }
         }
+    }
+
+    // 评论预热：首次进入任意本子详情页时，后台先把「网页端」会话建好。
+    //
+    // 评论只有网页端实现支持，首次要解析网页域名再登录握手（实测要好几秒）；预热之后
+    // 用户点「发表评论」几乎是即时返回，不会再出现「按钮灰很久」。整次运行只做一次，
+    // 且失败静默（真发评论时还会再走一次同样的流程）。
+    var commentWarmed by remember { mutableStateOf(false) }
+    LaunchedEffect(current) {
+        if (current != AppRoute.Album || commentWarmed) return@LaunchedEffect
+        commentWarmed = true
+        ApiBridge.commentWarmup()
     }
 
     // 换了账号（登录 / 切换 / 退出 / 清空）就让收藏列表页作废，下次进入重新拉取
@@ -393,6 +407,7 @@ fun AppShell(onRecreate: () -> Unit) {
 
                     AppRoute.Album -> AlbumScreen(
                         albumId = albumId,
+                        cache = pageCache,
                         queue = queue,
                         // 下载选项只在下载页真正加载过之后才落盘：否则会把默认值覆盖到用户配置上
                         saveDownloadConf = {
@@ -502,6 +517,11 @@ fun AppShell(onRecreate: () -> Unit) {
 
                     AppRoute.Reader -> ReaderScreen(
                         state = reader,
+                        queue = queue,
+                        // 阅读器内「下载」与详情页同一套动作：先落盘下载选项再入队
+                        saveDownloadConf = {
+                            if (download.loaded) ApiBridge.updateConfig(download.confPatch())
+                        },
                         modifier = Modifier.fillMaxSize(),
                     )
 
@@ -533,6 +553,8 @@ fun AppShell(onRecreate: () -> Unit) {
                             // 图片缓存在这里清；探索结果、收藏列表、详情预览由各自的
                             // 状态标记作废，下次进入重新拉取。
                             CoverCache.clear()
+                            pageCache.clear()
+                            ExplorerCoverCache.clear()
                             explore.reset()
                             account.preview = null
                             account.previewError = null

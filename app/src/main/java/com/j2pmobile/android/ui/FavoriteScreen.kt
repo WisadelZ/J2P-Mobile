@@ -132,6 +132,19 @@ fun FavoriteScreen(
 ) {
     val scope = rememberCoroutineScope()
 
+    // 空闲预取：屏幕静止后往后预取最多 2 页（列表数据 + 封面），翻页时几乎瞬间出图
+    IdleListPrefetch(
+        currentPage = state.uiPage,
+        totalPages = state.totalPages,
+        ready = !state.loading && state.items.isNotEmpty(),
+        fetchPage = { page ->
+            when (val result = ApiBridge.favoritePage(page, state.folderId)) {
+                is ApiResult.Ok -> result.value.items
+                is ApiResult.Err -> null
+            }
+        },
+    )
+
     /** 加载指定页；筛选与页码都由 state 持有。 */
     fun startLoad(page: Int) {
         if (state.loading) return

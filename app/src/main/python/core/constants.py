@@ -20,7 +20,7 @@
 """
 
 APP_NAME = "J2P Mobile"
-APP_VERSION = "v2.6.0"
+APP_VERSION = "v2.6.1"
 
 # 服务端清单地址：全部走 HTTPS（Android 9 起默认禁明文，端上不再放行任何明文域名）。
 # 软件更新清单由 Kotlin 侧 Updater 消费；补丁清单与公告由 Python / Kotlin 分别消费。
